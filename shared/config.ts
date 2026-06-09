@@ -139,6 +139,9 @@ function parseConfig(raw: unknown): Config {
 
   const d = (r.defaults ?? {}) as Record<string, unknown>;
 
+  // Test workspace: resolve once here so both extensions share the same dirs.
+  const testsDir = expandPath(str(r.testsDir, "./tests"));
+
   // Per-role display glyphs; keep only non-empty string values (an empty/absent
   // key falls back to the emoji/ASCII defaults in getRoleIcon).
   const ic = (r.icons ?? {}) as Record<string, unknown>;
@@ -152,6 +155,10 @@ function parseConfig(raw: unknown): Config {
     token: requireString("token"),
     stateDir: expandTilde(str(r.stateDir, "~/.pi-e2e-tester")),
     logsDir: expandPath(str(r.logsDir, "./logs")),
+    testsDir,
+    testsCasesDir: join(testsDir, "cases"),
+    testsResultsDir: join(testsDir, "results"),
+    testsScreenshotsDir: join(testsDir, "screenshots"),
     host: str(r.host, "127.0.0.1"),
     icons,
     target,
@@ -246,6 +253,23 @@ export function getStateDir(): string {
 // ~ expanded; relative resolved against projectDir.
 export function getLogsDir(): string {
   return loadConfig().logsDir;
+}
+
+// The test workspace dirs (testsDir + cases/results/screenshots subpaths),
+// absolute and pre-resolved. The ONLY filesystem the gated LLMs may touch.
+export function getTestsDirs(): {
+  root: string;
+  cases: string;
+  results: string;
+  screenshots: string;
+} {
+  const c = loadConfig();
+  return {
+    root: c.testsDir,
+    cases: c.testsCasesDir,
+    results: c.testsResultsDir,
+    screenshots: c.testsScreenshotsDir,
+  };
 }
 
 export function getHost(): string {

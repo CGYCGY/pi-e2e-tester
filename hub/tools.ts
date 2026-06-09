@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -16,6 +17,7 @@ import { getDefaults } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import { postToSpoke } from "../shared/transport.ts";
 import type { Verdict } from "../shared/types.ts";
+import { ensureTestsDirs, safeWorkspacePath } from "../shared/workspace.ts";
 import { type SpokeRegistry, SPOKE_ROLE } from "./spokes.ts";
 
 /** A pending `messenger` intent awaiting its correlated intent_result. */
@@ -45,6 +47,8 @@ export interface HubToolsDeps {
   devUp: () => Promise<{ ok: boolean; detail: string }>;
   /** Bring-up step: stop convex + metro (+ optionally the spoke). */
   devDown: (opts?: { spoke?: boolean }) => Promise<{ ok: boolean; detail: string }>;
+  /** Resolved test-workspace dirs — the hub's ONLY filesystem access (gated LLM). */
+  testsDirs: { cases: string; results: string; screenshots: string };
 }
 
 export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
@@ -59,7 +63,13 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     usbAttach,
     devUp,
     devDown,
+    testsDirs,
   } = deps;
+
+  // tests_* are the hub's ONLY filesystem access (built-in read/write/edit are
+  // gated off). Map a kind to its dir; every name is path-guarded to a *.md in it.
+  const testsDirFor = (kind: "case" | "result") =>
+    kind === "case" ? testsDirs.cases : testsDirs.results;
 
   // messenger: THE single door to the android spoke. The hub sends a
   // natural-language INTENT; the spoke's own LLM interprets it (driving the
@@ -242,6 +252,94 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
       return {
         content: [{ type: "text", text: res.detail }],
         details: { ok: res.ok },
+      };
+    },
+  });
+
+  // tests_list / tests_read / tests_write: the hub's scoped Markdown workspace.
+  // cases/ = test scenarios the hub READS then drives via messenger; results/ =
+  // where it RECORDS PASS/FAIL outcomes. These three tools are the hub's ONLY
+  // filesystem access — built-in bash/read/write/edit are gated off at launch.
+  const KIND_PARAM = Type.Union([Type.Literal("case"), Type.Literal("result")], {
+    description: "Which set: 'case' (test scenarios in tests/cases) or 'result' (outcome records in tests/results).",
+  });
+
+  pi.registerTool({
+    name: "tests_list",
+    label: "Tests list",
+    description:
+      "List the *.md filenames in the test workspace for a kind ('case' = test " +
+      "scenarios under tests/cases, 'result' = recorded outcomes under tests/results). " +
+      "The tests_* tools are your ONLY filesystem access.",
+    promptSnippet: "List the *.md test cases or results in the project test workspace",
+    promptGuidelines: [
+      "Use tests_list to discover available cases before reading/driving them.",
+    ],
+    parameters: Type.Object({ kind: KIND_PARAM }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      ensureTestsDirs(testsDirs);
+      const dir = testsDirFor(params.kind);
+      const files = readdirSync(dir)
+        .filter((f) => f.endsWith(".md"))
+        .sort();
+      const body = files.length ? files.join("\n") : `(no ${params.kind} files yet)`;
+      return {
+        content: [{ type: "text", text: body }],
+        details: { kind: params.kind, count: files.length, files },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "tests_read",
+    label: "Tests read",
+    description:
+      "Read a *.md file from the test workspace: kind 'case' (a test scenario in " +
+      "tests/cases you then drive via messenger) or 'result' (a recorded outcome in " +
+      "tests/results). Path-guarded to that dir — the tests_* tools are your ONLY " +
+      "filesystem access.",
+    promptSnippet: "Read a *.md test case or result file from the project test workspace",
+    promptGuidelines: [
+      "Read a case before driving it; never invent a scenario from memory.",
+    ],
+    parameters: Type.Object({
+      kind: KIND_PARAM,
+      name: Type.String({ description: "Bare file name, e.g. sign-in.md (no slashes / no '..')." }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const path = safeWorkspacePath(testsDirFor(params.kind), ".", params.name, "md");
+      const text = readFileSync(path, "utf8");
+      return {
+        content: [{ type: "text", text }],
+        details: { kind: params.kind, name: params.name, bytes: text.length },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "tests_write",
+    label: "Tests write",
+    description:
+      "Write (create or overwrite) a *.md file in the test workspace: kind 'case' " +
+      "(a test scenario in tests/cases) or 'result' (a PASS/FAIL outcome record in " +
+      "tests/results). Path-guarded to that dir; the dir is created if missing. The " +
+      "tests_* tools are your ONLY filesystem access.",
+    promptSnippet: "Write a *.md test case or result file in the project test workspace",
+    promptGuidelines: [
+      "Record each run's PASS/FAIL verdict + key detail as a result file.",
+    ],
+    parameters: Type.Object({
+      kind: KIND_PARAM,
+      name: Type.String({ description: "Bare file name, e.g. sign-in.md (no slashes / no '..')." }),
+      content: Type.String({ description: "Full Markdown content to write (overwrites any existing file)." }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      ensureTestsDirs(testsDirs);
+      const path = safeWorkspacePath(testsDirFor(params.kind), ".", params.name, "md");
+      writeFileSync(path, params.content, "utf8");
+      return {
+        content: [{ type: "text", text: `Wrote ${params.kind} ${params.name} (${params.content.length} bytes).` }],
+        details: { kind: params.kind, name: params.name, bytes: params.content.length },
       };
     },
   });

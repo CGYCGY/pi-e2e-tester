@@ -10,6 +10,9 @@
   "logsDir": "./logs",
   "_logsDir_note": "Where per-role logfiles AND the backgrounded app dev-server logs are written. The hub TAILS these for the real ready signal (auto-readiness) instead of blindly probing ports. Relative paths resolve against the project dir; a leading ~ expands to $HOME.",
 
+  "testsDir": "./tests",
+  "_testsDir_note": "Test workspace: holds cases/ (*.md), results/ (*.md), screenshots/ (*.png). The gated LLMs reach the filesystem ONLY here, via the tests_* / read_screenshot tools. Relative paths resolve against the project dir; a leading ~ expands to $HOME.",
+
   "target": {
     "_about": "The app repo under test. The tester drives it ONLY through the app's own dev tooling (its `just` recipes / scripts) + adb + agent-device; your app repo stays UNTOUCHED. `dir` is the ONE path to change when you move the repo (a startup guard fails loud if it is stale).",
     "dir": "/absolute/path/to/your/app-repo",
@@ -28,7 +31,7 @@
       "files/mmkv/mobile-template.crc"
     ],
     "_resetPaths_note": "App-private files the `app cold-reset` verb `run-as <androidPackage> rm -f`s (relative to the package's private data dir) to force a true signed-out first run — the auth tokens / user store that survive a force-stop. APP-SPECIFIC: list the files YOUR app persists creds/session in. The defaults shown are an Expo/RN example (SecureStore + an MMKV store). An EMPTY array [] makes cold-reset a plain force-stop. Best-effort per file (a missing path is a no-op).",
-    "spokeHints": "Auth: <where the test creds live and how to sign in, e.g. 'creds are in the file at the PI env path envTest; read it when you need to log in'>. <any app-specific gotchas the spoke should know>. Use the app verb's cold-reset for a signed-out first run before testing sign-in.",
+    "spokeHints": "Auth: <where the test creds live and how to sign in, e.g. 'creds are in the file at the PI env path envTest; use the read_creds tool to read it when you need to log in'>. <any app-specific gotchas the spoke should know>. Use the app verb's cold-reset for a signed-out first run before testing sign-in.",
     "_spokeHints_note": "APP/AUTH playbook injected verbatim into the spoke LLM's system prompt (alongside the generic verb skeleton + the device's DeviceProfile.submitHint). Put the operational knowledge the spoke CANNOT derive: where creds live, reset semantics, app quirks. Keep DEVICE-input rules (e.g. how to submit a field) OUT of here — those live on the DeviceProfile (device.profile). Empty string ⇒ no app hints."
   },
 

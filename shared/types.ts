@@ -267,6 +267,15 @@ export interface Config {
   stateDir: string;
   /** Relative paths resolve against projectDir. */
   logsDir: string;
+  /**
+   * Project-local test workspace (the ONLY filesystem the gated LLMs touch).
+   * Absolute; relative paths in config resolve against projectDir. Subpaths are
+   * pre-resolved so both extensions read them without re-deriving.
+   */
+  testsDir: string;
+  testsCasesDir: string;
+  testsResultsDir: string;
+  testsScreenshotsDir: string;
   /** Always 127.0.0.1 in v1. */
   host: string;
   /**

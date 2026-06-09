@@ -134,9 +134,12 @@ trap keep_open EXIT
 # --- launch pi ---------------------------------------------------------------
 # -nc drops ambient AGENTS.md/CLAUDE.md so the harness inherits no parent-repo
 # context; its own guidance lives in .pi/APPEND_SYSTEM.md (which -nc ignores).
+# --no-builtin-tools HARD-GATES the spoke LLM to ONLY the registered device verbs
+# (no built-in bash/read/write/edit) — all path access goes through guarded tools
+# (read_screenshot / read_creds); built-in tools have no path sandbox.
 # cwd = project dir so the extension's relative imports and .pi/ resolve.
 cd "$PROJECT_DIR"
 PI_ARGS=()
 [[ -n "$MODEL" ]] && PI_ARGS+=(--model "$MODEL")
 [[ -n "$THINKING" ]] && PI_ARGS+=(--thinking "$THINKING")
-exec pi --no-extensions -nc -e "$EXTENSION" --name "pi-e2e-tester:$ROLE" ${PI_ARGS[@]+"${PI_ARGS[@]}"}
+exec pi --no-extensions --no-builtin-tools -nc -e "$EXTENSION" --name "pi-e2e-tester:$ROLE" ${PI_ARGS[@]+"${PI_ARGS[@]}"}

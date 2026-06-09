@@ -38,9 +38,11 @@ import {
   getRoleFromEnv,
   getRoleIcon,
   getTarget,
+  getTestsDirs,
 } from "../shared/config.ts";
 import { createLogger, type Logger } from "../shared/log.ts";
 import { markConnected } from "../shared/state.ts";
+import { ensureTestsDirs } from "../shared/workspace.ts";
 import {
   createTransportServer,
   postToHub,
@@ -113,6 +115,11 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const androidPackage = target.androidPackage;
   const crashLogTag = target.crashLogTag;
 
+  // Test workspace: look saves screenshots here, read_screenshot reads them back.
+  // Built-in tools are gated off, so this is the spoke's only filesystem surface.
+  const testsDirs = getTestsDirs();
+  ensureTestsDirs(testsDirs);
+
   // The thin agent-device wrapper, pinned to the configured phone serial + dev pkg.
   const device = new Device({
     serial: deviceCfg.serial,
@@ -157,15 +164,17 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const SPOKE_RULES = `
 
 ## pi-e2e-tester android spoke
-You are the android spoke. You drive \`${androidPackage}\` on a REAL phone via these 8 verbs:
+You are the android spoke. You drive \`${androidPackage}\` on a REAL phone via these verbs (built-in tools are DISABLED — these are all you have):
 - observe — a11y snapshot + foreground app/activity (CHEAP; your default eyes; read-only).
-- look — screenshot to /tmp; returns a FILE PATH. Read that file ONLY when color/layout/vision actually matters.
+- look — screenshot the phone; returns a file NAME. View it via read_screenshot ONLY when color/layout/vision actually matters.
+- read_screenshot — view a look screenshot inline (pass the name look returned); the ONLY way to see the pixels.
 - tap — tap by "x y" coords, an @ref from observe, or a selector.
 - type — type into the focused field. submit:true (the default) submits it for you using THIS device's submit method (see the Device note below).
 - key — send a hardware key (e.g. enter, back).
 - assert — check a UI predicate (visible|hidden|exists|editable|selected|text) on a selector; contributes to your verdict.
 - app — launch | stop | cold-reset the dev app (guarded to ${androidPackage}).
 - logcat — pull recent ${crashLogTag} error lines for your failure report.
+- read_creds — read the fixed sign-in creds file (the ONLY way to get the test credentials).
 
 You receive ONE test intent per turn. Use observe (cheap) to look BEFORE acting; only use look (screenshot) when vision actually matters. read ≠ act.
 
@@ -722,13 +731,15 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     getLastForeground: () => lastForeground,
   });
 
-  // ── The 9 verbs (registered as pi tools for the spoke's OWN LLM) ─────────────
+  // ── Device + workspace verbs (registered as pi tools for the spoke's OWN LLM) ─
   registerSpokeTools(pi, {
     device,
     profile,
     roleLog,
     androidPackage,
     crashLogTag,
+    screenshotsDir: testsDirs.screenshots,
+    envTestPath: target.envTest,
     withGuards,
     refreshUI,
     setActiveCtx: (ctx) => {

@@ -38,6 +38,7 @@ import {
   getPort,
   getReadiness,
   getTarget,
+  getTestsDirs,
 } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { markConnected } from "../shared/state.ts";
@@ -620,6 +621,7 @@ export default function (pi: ExtensionAPI) {
     usbAttach,
     devUp,
     devDown,
+    testsDirs: getTestsDirs(),
   });
 }
 

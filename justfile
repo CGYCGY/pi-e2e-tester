@@ -46,12 +46,15 @@ _state-dir:
 # --- hub ---------------------------------------------------------------------
 
 # --no-extensions + -e load ONLY the hub extension; -nc drops ambient context.
+# --no-builtin-tools HARD-GATES the hub LLM to ONLY the registered tools (no
+# built-in bash/read/write/edit); its only filesystem access is the scoped
+# tests_* tools (built-in tools have no path sandbox).
 # Launch the hub orchestrator pi session in THIS terminal.
 hub:
     @test -f "{{hub_ext}}" || { echo "hub extension not found: {{hub_ext}} (owned by a later phase-2 agent)"; exit 1; }
     model=$(jq -r '.hub.model // empty' "{{config}}"); thinking=$(jq -r '.hub.thinking // empty' "{{config}}"); \
     args=(); [ -n "$model" ] && args+=(--model "$model"); [ -n "$thinking" ] && args+=(--thinking "$thinking"); \
-    cd "{{project_dir}}" && exec pi --no-extensions -nc -e "{{hub_ext}}" --name "pi-e2e-tester:hub" ${args[@]+"${args[@]}"}
+    cd "{{project_dir}}" && exec pi --no-extensions --no-builtin-tools -nc -e "{{hub_ext}}" --name "pi-e2e-tester:hub" ${args[@]+"${args[@]}"}
 
 # --- spoke -------------------------------------------------------------------
 

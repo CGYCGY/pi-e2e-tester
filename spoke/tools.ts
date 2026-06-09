@@ -1,11 +1,16 @@
 /**
- * spoke/tools.ts — the 9 device verbs registered as pi tools for the spoke's OWN
- * LLM. Extracted verbatim from spoke/index.ts; the closure variables the verbs
- * touched are now threaded in via a typed `deps` object (getter/setter for the
- * mutable runtime flags, plain handles for the read-only device surface).
+ * spoke/tools.ts — the device + workspace verbs registered as pi tools for the
+ * spoke's OWN LLM. The closure variables the verbs touched are threaded in via a
+ * typed `deps` object (getter/setter for the mutable runtime flags, plain handles
+ * for the read-only device surface).
+ *
+ * Built-in tools are gated off at launch (--no-builtin-tools), so the verbs that
+ * used to lean on the built-in read (the screenshot file, the creds file) are now
+ * served by code-guarded tools here: read_screenshot (the look PNG, inline image)
+ * and read_creds (the one fixed envTest file).
  */
 
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -15,18 +20,23 @@ import type {
 import { Type } from "typebox";
 
 import type { Logger } from "../shared/log.ts";
+import { safeWorkspacePath } from "../shared/workspace.ts";
 
 import type { Device } from "./device.ts";
 import { scanForCrash } from "./guards.ts";
 import type { DeviceProfile } from "./profiles/index.ts";
 
-/** Handles the 9 device verbs need from the spoke runtime. */
+/** Handles the device + workspace verbs need from the spoke runtime. */
 export interface SpokeToolDeps {
   device: Device;
   profile: DeviceProfile;
   roleLog: Logger;
   androidPackage: string;
   crashLogTag: string;
+  /** Where look saves PNGs and read_screenshot reads them (path-guarded). */
+  screenshotsDir: string;
+  /** The ONE fixed sign-in creds file read_creds may read (config.target.envTest). */
+  envTestPath: string;
   /** The shared acting-verb wrapper (wrong-target before, crash-guard after). */
   withGuards: (
     verb: string,
@@ -48,6 +58,8 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     roleLog,
     androidPackage,
     crashLogTag,
+    screenshotsDir,
+    envTestPath,
     withGuards,
     refreshUI,
     setActiveCtx,
@@ -113,19 +125,21 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 2) look — screenshot to /tmp; return the FILE PATH (LLM reads it only if vision matters).
+  // 2) look — screenshot into tests/screenshots; return the FILE NAME (view it
+  // via read_screenshot only if vision matters; built-in read is gated off).
   pi.registerTool({
     name: "look",
-    label: "Look (screenshot → /tmp)",
+    label: "Look (screenshot)",
     description:
-      "Capture a screenshot of the phone to a /tmp PNG (downscaled to <=1200px) and " +
-      "return its FILE PATH. Use this ONLY when color, layout, overlap, or other " +
-      "visual detail actually matters — then read the returned file. For text / " +
-      "bounds / presence checks use observe or assert instead (cheaper).",
-    promptSnippet: "Screenshot the phone to /tmp and return the file path (read it only when vision matters).",
+      "Capture a screenshot of the phone to a PNG in the project's screenshots dir " +
+      "(downscaled to <=1200px) and return its FILE NAME. Use this ONLY when color, " +
+      "layout, overlap, or other visual detail actually matters — then view it with " +
+      "the read_screenshot tool. For text / bounds / presence checks use observe or " +
+      "assert instead (cheaper). Do NOT use a built-in read — there isn't one.",
+    promptSnippet: "Screenshot the phone and return its file name (view it via read_screenshot only when vision matters).",
     promptGuidelines: [
       "Prefer observe; only use look when you genuinely need to SEE the pixels.",
-      "look returns a file PATH — read that file; the image is never dumped inline.",
+      "look returns a NAME — pass it to read_screenshot to view; the image is never dumped inline.",
     ],
     parameters: Type.Object({
       label: Type.Optional(
@@ -135,7 +149,8 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       setActiveCtx(ctx);
       const safe = (params.label ?? "shot").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) || "shot";
-      const out = join(tmpdir(), `pi-e2e-${safe}-${Date.now()}.png`);
+      const name = `pi-e2e-${safe}-${Date.now()}.png`;
+      const out = join(screenshotsDir, name);
       try {
         await device.screenshot(out, 1200);
       } catch (err) {
@@ -148,10 +163,46 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
         content: [
           {
             type: "text",
-            text: `Screenshot saved to ${out} (<=1200px). Read this file ONLY if you need to see the pixels; otherwise prefer observe.`,
+            text: `Screenshot saved as ${name} (<=1200px). View it with read_screenshot ONLY if you need to see the pixels; otherwise prefer observe.`,
           },
         ],
-        details: { path: out },
+        details: { name, path: out },
+      };
+    },
+  });
+
+  // 2b) read_screenshot — return a look PNG as an INLINE image (replaces the lost
+  // built-in image read). Path-guarded to the screenshots dir; call only when pixels matter.
+  pi.registerTool({
+    name: "read_screenshot",
+    label: "Read screenshot (inline image)",
+    description:
+      "View a screenshot captured by `look`: pass the file NAME it returned and this " +
+      "returns the PNG INLINE so you can see the pixels. Use ONLY when color / layout " +
+      "actually matters — observe is cheaper for text/bounds. This is the only way to " +
+      "see a screenshot (there is no built-in read).",
+    promptSnippet: "View a look screenshot inline (pass the name look returned); use only when vision matters.",
+    promptGuidelines: [
+      "Call read_screenshot with the name look returned, only when you must SEE the pixels.",
+    ],
+    parameters: Type.Object({
+      name: Type.String({ description: "The screenshot file name look returned (e.g. pi-e2e-home-123.png)." }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      setActiveCtx(ctx);
+      let data: string;
+      try {
+        const path = safeWorkspacePath(screenshotsDir, ".", params.name, "png");
+        data = readFileSync(path).toString("base64");
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `read_screenshot failed: ${(err as Error).message}` }],
+          details: { ok: false },
+        };
+      }
+      return {
+        content: [{ type: "image", data, mimeType: "image/png" }],
+        details: { name: params.name },
       };
     },
   });
@@ -428,6 +479,45 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
       return {
         content: [{ type: "text", text: `Recent ${crashLogTag} log:\n${body}` }],
         details: { lines: body.split("\n").length },
+      };
+    },
+  });
+
+  // read_creds — read the ONE fixed sign-in creds file (config.target.envTest).
+  // Replaces the built-in read the spokeHints used to point at; it can read NO
+  // other path (the path is fixed in code, not a parameter).
+  pi.registerTool({
+    name: "read_creds",
+    label: "Read sign-in creds",
+    description:
+      "Read the sign-in test credentials from the project's fixed creds file and " +
+      "return its contents. Call this when you need the AuthKit creds to sign in. " +
+      "Takes no arguments — it reads ONLY that one fixed file (no other path).",
+    promptSnippet: "Read the fixed sign-in creds file (the only way to get the test credentials).",
+    promptGuidelines: [
+      "Call read_creds when signing in; never guess credentials.",
+    ],
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      setActiveCtx(ctx);
+      if (!envTestPath) {
+        return {
+          content: [{ type: "text", text: "read_creds: no creds file is configured (target.envTest is empty)." }],
+          details: { ok: false },
+        };
+      }
+      let text: string;
+      try {
+        text = readFileSync(envTestPath, "utf8");
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `read_creds failed: ${(err as Error).message}` }],
+          details: { ok: false },
+        };
+      }
+      return {
+        content: [{ type: "text", text }],
+        details: { ok: true, bytes: text.length },
       };
     },
   });

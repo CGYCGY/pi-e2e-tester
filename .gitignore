@@ -28,3 +28,10 @@ state.json
 # TypeScript build artifacts (we run noEmit, but just in case)
 *.tsbuildinfo
 dist/
+
+# Test workspace: ignore all contents, keep only the dir markers
+tests/**
+!tests/**/
+
+# Always keep .gitkeep directory markers anywhere
+!.gitkeep
