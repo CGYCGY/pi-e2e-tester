@@ -53,6 +53,13 @@
   "host": "127.0.0.1",
   "_host_note": "Bind/connect host for all transport servers. Localhost only.",
 
+  "icons": {
+    "android": "🤖",
+    "web": "🌐",
+    "ios": "🍎"
+  },
+  "_icons_note": "Per-role glyph in the status widget (next to the colored ● dot). Emoji by default; set a role to ASCII (e.g. \"android\": \"AND\") on terminals without emoji/Nerd-Font support. The ● dot color (green=app foreground, amber=device reachable, red=no device) is separate.",
+
   "hub": {
     "model": "openai-codex/gpt-5.5",
     "thinking": "high",

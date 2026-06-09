@@ -139,12 +139,21 @@ function parseConfig(raw: unknown): Config {
 
   const d = (r.defaults ?? {}) as Record<string, unknown>;
 
+  // Per-role display glyphs; keep only non-empty string values (an empty/absent
+  // key falls back to the emoji/ASCII defaults in getRoleIcon).
+  const ic = (r.icons ?? {}) as Record<string, unknown>;
+  const icons: Record<string, string> = {};
+  for (const [k, v] of Object.entries(ic)) {
+    if (typeof v === "string" && v.length > 0) icons[k] = v;
+  }
+
   return {
     projectDir: PROJECT_DIR,
     token: requireString("token"),
     stateDir: expandTilde(str(r.stateDir, "~/.pi-e2e-tester")),
     logsDir: expandPath(str(r.logsDir, "./logs")),
     host: str(r.host, "127.0.0.1"),
+    icons,
     target,
     device,
     ports,
@@ -241,6 +250,28 @@ export function getLogsDir(): string {
 
 export function getHost(): string {
   return loadConfig().host;
+}
+
+// Default per-role display glyphs. Emoji is the out-of-the-box look; a terminal
+// without emoji/Nerd-Font support can override any role to ASCII in config.json
+// (icons.<role> = "AND"/"WEB"/"IOS").
+const DEFAULT_ICONS: Record<string, string> = {
+  android: "🤖",
+  web: "🌐",
+  ios: "🍎",
+};
+const ASCII_ICONS: Record<string, string> = {
+  android: "AND",
+  web: "WEB",
+  ios: "IOS",
+};
+
+// The display glyph for a spoke role: config override → emoji default → ASCII
+// default → upper-cased role. Used by both the hub widget and the spoke status line.
+export function getRoleIcon(role: string): string {
+  const override = loadConfig().icons[role];
+  if (typeof override === "string" && override.length > 0) return override;
+  return DEFAULT_ICONS[role] ?? ASCII_ICONS[role] ?? role.toUpperCase();
 }
 
 export function getTarget(): TargetConfig {

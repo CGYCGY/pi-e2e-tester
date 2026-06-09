@@ -140,6 +140,13 @@ export interface SpokeStatus {
   connected: boolean;
   /** The test device is reachable (adb sees the pinned serial). */
   deviceReady: boolean;
+  /**
+   * Coarse readiness carried on every heartbeat so the hub renders the right dot
+   * WITHOUT re-deriving it: ready=green (dev app foreground), wrong-target=amber
+   * (device reachable, app not foreground), needs-device/error=red. Absent ⇒ the
+   * hub falls back to deviceReady.
+   */
+  readyState?: SpokeReadyState;
   /** Drives the wrong-target guard view. */
   foregroundPackage?: string;
   model?: string;
@@ -249,6 +256,13 @@ export interface Config {
   logsDir: string;
   /** Always 127.0.0.1 in v1. */
   host: string;
+  /**
+   * Per-role display glyph for the status widget, keyed by role ("android" |
+   * "web" | "ios"). Default is an emoji map (🤖/🌐/🍎); set a key to "AND"/"WEB"/
+   * "IOS" (or any ASCII) on terminals without emoji/Nerd-Font support. Resolved
+   * via getRoleIcon(); the colored ● status dot is rendered separately.
+   */
+  icons: Record<string, string>;
   target: TargetConfig;
   device: DeviceConfig;
   ports: PortsConfig;
