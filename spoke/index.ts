@@ -26,14 +26,10 @@
  * device surface; the guards are non-negotiable code around the acting ones.
  */
 
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 import {
   getDefaults,
@@ -57,9 +53,11 @@ import type {
   Verdict,
 } from "../shared/types.ts";
 
+import { registerSpokeCommands } from "./commands.ts";
 import { Device } from "./device.ts";
 import { assertOnTarget, scanForCrash } from "./guards.ts";
 import { getProfile } from "./profiles/index.ts";
+import { registerSpokeTools } from "./tools.ts";
 
 /** This spoke's role (phase 1 has exactly one spoke: android). */
 const ROLE: SpokeRole = "android";
@@ -706,406 +704,44 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   });
 
   // ── Commands (manual operation / debugging) ──────────────────────────────────
-  pi.registerCommand("verify", {
-    description: "Re-check device reachability + foreground app, and report readiness.",
-    handler: async (_args, ctx) => {
+  registerSpokeCommands(pi, {
+    role,
+    getRoleIcon,
+    buildStatus,
+    verifyReady,
+    refreshUI,
+    setActiveCtx: (ctx) => {
       activeCtx = ctx;
-      halted = false;
-      await verifyReady({ launch: true });
-      refreshUI(ctx);
     },
+    getHalted: () => halted,
+    setHalted: (v) => {
+      halted = v;
+    },
+    getReadyState: () => readyState,
+    getDeviceReady: () => deviceReady,
+    getLastForeground: () => lastForeground,
   });
 
-  pi.registerCommand("spoke-status", {
-    description: "Show this spoke's device + ready state.",
-    handler: async (_args, ctx) => {
+  // ── The 9 verbs (registered as pi tools for the spoke's OWN LLM) ─────────────
+  registerSpokeTools(pi, {
+    device,
+    profile,
+    roleLog,
+    androidPackage,
+    crashLogTag,
+    withGuards,
+    refreshUI,
+    setActiveCtx: (ctx) => {
       activeCtx = ctx;
-      const s = buildStatus();
-      ctx.ui.notify(
-        `${getRoleIcon(role)}: ${readyState}${halted ? " (HALTED)" : ""} | device=${
-          deviceReady ? "ready" : "down"
-        } | fg=${lastForeground ?? "?"} | $${s.cost?.toFixed(3) ?? "0"}`,
-        halted ? "warning" : "info",
-      );
-      refreshUI(ctx);
     },
-  });
-
-  // ── The 8 verbs (registered as pi tools for the spoke's OWN LLM) ─────────────
-
-  // 1) observe — a11y snapshot + foreground app/activity (CHEAP; the default eyes).
-  pi.registerTool({
-    name: "observe",
-    label: "Observe (a11y + appstate)",
-    description:
-      "Read the screen cheaply: the accessibility-tree snapshot (text + @eN refs " +
-      "you can tap) plus the foreground app/activity. Read-only — your DEFAULT eyes. " +
-      "Prefer this over `look`; only screenshot when color/layout/vision matters. " +
-      "Pass interactive:true to trim to interactive elements + refresh refs.",
-    promptSnippet: "Read the screen cheaply (a11y snapshot + foreground app).",
-    promptGuidelines: [
-      "Use observe to look before acting; it is read-only and cheap.",
-      "Only use look (screenshot) when color/layout/vision actually matters.",
-    ],
-    parameters: Type.Object({
-      interactive: Type.Optional(
-        Type.Boolean({
-          description: "Trim to interactive elements only and refresh @eN refs (default false).",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      let foreground = "(unknown)";
-      let activity = "";
-      try {
-        const state = await device.appstate();
-        foreground = state.package || "(unknown)";
-        activity = state.activity;
-        lastForeground = state.package || undefined;
-        deviceReady = true;
-      } catch (err) {
-        deviceReady = false;
-        refreshUI(ctx);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `observe: device unreachable (${(err as Error).message}). The phone may be detached.`,
-            },
-          ],
-          details: { deviceReady: false },
-        };
-      }
-      const snap = await device.snapshot(params.interactive ?? false);
-      refreshUI(ctx);
-      const onTarget = foreground === androidPackage;
-      const header =
-        `Foreground: ${foreground}${activity ? ` (${activity})` : ""}` +
-        (onTarget ? "" : `  ⚠ NOT the dev app ${androidPackage}`);
-      return {
-        content: [{ type: "text", text: `${header}\n\n${snap}` }],
-        details: { foreground, activity, onTarget, interactive: params.interactive ?? false },
-      };
+    setLastForeground: (v) => {
+      lastForeground = v;
     },
-  });
-
-  // 2) look — screenshot to /tmp; return the FILE PATH (LLM reads it only if vision matters).
-  pi.registerTool({
-    name: "look",
-    label: "Look (screenshot → /tmp)",
-    description:
-      "Capture a screenshot of the phone to a /tmp PNG (downscaled to <=1200px) and " +
-      "return its FILE PATH. Use this ONLY when color, layout, overlap, or other " +
-      "visual detail actually matters — then read the returned file. For text / " +
-      "bounds / presence checks use observe or assert instead (cheaper).",
-    promptSnippet: "Screenshot the phone to /tmp and return the file path (read it only when vision matters).",
-    promptGuidelines: [
-      "Prefer observe; only use look when you genuinely need to SEE the pixels.",
-      "look returns a file PATH — read that file; the image is never dumped inline.",
-    ],
-    parameters: Type.Object({
-      label: Type.Optional(
-        Type.String({ description: "Short label for the filename (e.g. 'home', 'authkit')." }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const safe = (params.label ?? "shot").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) || "shot";
-      const out = join(tmpdir(), `pi-e2e-${safe}-${Date.now()}.png`);
-      try {
-        await device.screenshot(out, 1200);
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `look failed: ${(err as Error).message}` }],
-          details: { ok: false },
-        };
-      }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Screenshot saved to ${out} (<=1200px). Read this file ONLY if you need to see the pixels; otherwise prefer observe.`,
-          },
-        ],
-        details: { path: out },
-      };
+    setDeviceReady: (v) => {
+      deviceReady = v;
     },
-  });
-
-  // 3) tap — guarded acting verb (wrong-target before, crash-guard after).
-  pi.registerTool({
-    name: "tap",
-    label: "Tap (guarded)",
-    description:
-      "Tap the screen. Target is coordinates \"x y\", an @ref from observe, or a " +
-      "selector (e.g. id=\"submit\" or label=\"Allow\"). GUARDED in code: refuses " +
-      "unless the dev app is foreground (wrong-target guard), and fails the step if " +
-      "new " + crashLogTag + " errors appear right after (crash-guard).",
-    promptSnippet: "Tap by coords / @ref / selector (guarded to the dev app).",
-    parameters: Type.Object({
-      target: Type.String({
-        description: 'What to tap: "x y" coords, an @ref from observe, or a selector like id="submit".',
-      }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const { crash } = await withGuards("tap", () => device.click(params.target));
-      if (crash) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Tapped ${params.target}, but the CRASH-GUARD tripped (new ${crashLogTag} errors):\n${crash}`,
-            },
-          ],
-          details: { tapped: params.target, crashGuard: "tripped" },
-        };
-      }
-      return {
-        content: [{ type: "text", text: `Tapped ${params.target}.` }],
-        details: { tapped: params.target },
-      };
-    },
-  });
-
-  // 4) type — guarded acting verb with the KEYCODE_ENTER auth-submit baked in.
-  pi.registerTool({
-    name: "type",
-    label: "Type (guarded, auth-submit)",
-    description:
-      "Type text into the currently focused field. GUARDED in code (wrong-target + " +
-      "crash-guard). Pass submit:true (the DEFAULT) to submit the field after typing " +
-      "using THIS device's submit method (follow the Device note in your instructions); " +
-      "pass submit:false to type without submitting.",
-    promptSnippet: "Type into the focused field (submit:true submits it the device's way).",
-    promptGuidelines: [
-      "For auth fields, type with submit:true (default) and follow the Device note for how this phone submits.",
-    ],
-    parameters: Type.Object({
-      text: Type.String({ description: "Exact text to type into the focused field." }),
-      submit: Type.Optional(
-        Type.Boolean({
-          description:
-            "Submit the field after typing using the device's submit method (default true). " +
-            "Set false to type without submitting.",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const submit = params.submit ?? true;
-      const { crash } = await withGuards("type", async () => {
-        await device.type(params.text);
-        // Submit strategy comes from the selected DeviceProfile (e.g. samsung-galaxy
-        // submits via KEYCODE_ENTER, NEVER by tapping Continue/Sign-in).
-        if (submit) await profile.submit(device);
-      });
-      const note = submit ? " and submitted" : "";
-      if (crash) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Typed${note}, but the CRASH-GUARD tripped (new ${crashLogTag} errors):\n${crash}`,
-            },
-          ],
-          details: { typed: params.text.length, submit, crashGuard: "tripped" },
-        };
-      }
-      return {
-        content: [{ type: "text", text: `Typed ${params.text.length} char(s)${note}.` }],
-        details: { typed: params.text.length, submit },
-      };
-    },
-  });
-
-  // 5) key — guarded acting verb: send a hardware key (enter / back / etc.).
-  pi.registerTool({
-    name: "key",
-    label: "Key (guarded)",
-    description:
-      "Send a hardware key event (e.g. 'enter', 'back', 'tab'). GUARDED in code " +
-      "(wrong-target + crash-guard). Use key('enter') to submit a focused field per " +
-      "the Device note in your instructions.",
-    promptSnippet: "Send a hardware key (enter to submit fields per the device note).",
-    parameters: Type.Object({
-      key: Type.String({
-        description: "Key name (e.g. 'enter', 'back', 'tab') or a full KEYCODE_* name.",
-      }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const { crash } = await withGuards("key", () => device.pressKey(params.key));
-      if (crash) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Sent key '${params.key}', but the CRASH-GUARD tripped (new ${crashLogTag} errors):\n${crash}`,
-            },
-          ],
-          details: { key: params.key, crashGuard: "tripped" },
-        };
-      }
-      return {
-        content: [{ type: "text", text: `Sent key '${params.key}'.` }],
-        details: { key: params.key },
-      };
-    },
-  });
-
-  // 6) assert — is-predicate / visible-text check; contributes to the verdict.
-  pi.registerTool({
-    name: "assert",
-    label: "Assert (UI predicate)",
-    description:
-      "Check a UI predicate on a selector and report whether it holds. Predicate is " +
-      "one of visible | hidden | exists | editable | selected | text. For 'text', " +
-      "pass the expected value to compare. Read-only (no guards); use this to verify " +
-      "expected UI for your verdict (e.g. assert visible on a 'TODAY' label after login).",
-    promptSnippet: "Assert a UI predicate (visible/hidden/exists/editable/selected/text) for your verdict.",
-    promptGuidelines: [
-      "Use assert to turn 'the screen should show X' into a concrete pass/fail signal.",
-    ],
-    parameters: Type.Object({
-      predicate: Type.Union(
-        [
-          Type.Literal("visible"),
-          Type.Literal("hidden"),
-          Type.Literal("exists"),
-          Type.Literal("editable"),
-          Type.Literal("selected"),
-          Type.Literal("text"),
-        ],
-        { description: "The UI predicate to check." },
-      ),
-      selector: Type.String({
-        description: 'Selector or @ref to check, e.g. label="TODAY" or id="email" or @e12.',
-      }),
-      value: Type.Optional(
-        Type.String({ description: "Expected value for the 'text' predicate." }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const res = await device.is(params.predicate, params.selector, params.value);
-      const verb = `is ${params.predicate} ${params.selector}${params.value ? ` = ${params.value}` : ""}`;
-      return {
-        content: [
-          {
-            type: "text",
-            text: res.ok
-              ? `ASSERT PASS: ${verb}`
-              : `ASSERT FAIL: ${verb}${res.detail ? `\n${res.detail}` : ""}`,
-          },
-        ],
-        details: { ok: res.ok, predicate: params.predicate, selector: params.selector },
-      };
-    },
-  });
-
-  // 7) app — launch / stop / cold-reset the dev app (guarded to the dev package).
-  pi.registerTool({
-    name: "app",
-    label: "App (launch/stop/cold-reset)",
-    description:
-      `Control the dev app ${androidPackage}: action 'launch' (relaunch it), 'stop' ` +
-      "(force-stop), or 'cold-reset' (force a true signed-out first run by removing " +
-      "the app's configured reset files (target.resetPaths), then force-stop). All " +
-      "actions are GUARDED to the dev package in code — they can never touch another " +
-      "app. After launch, the crash-guard scans for startup " + crashLogTag + " errors.",
-    promptSnippet: `Launch / stop / cold-reset the dev app ${androidPackage} (guarded).`,
-    promptGuidelines: [
-      "cold-reset gives you a signed-out first run (use before testing the sign-in flow).",
-    ],
-    parameters: Type.Object({
-      action: Type.Union(
-        [Type.Literal("launch"), Type.Literal("stop"), Type.Literal("cold-reset")],
-        { description: "What to do with the dev app." },
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      // stop / cold-reset don't need the dev app foreground (they target it by
-      // package id, which is inherently guarded); launch is the one we crash-scan.
-      if (params.action === "stop") {
-        await device.forceStop();
-        lastForeground = undefined;
-        refreshUI(ctx);
-        return {
-          content: [{ type: "text", text: `Force-stopped ${androidPackage}.` }],
-          details: { action: "stop" },
-        };
-      }
-      if (params.action === "cold-reset") {
-        await device.coldReset();
-        lastForeground = undefined;
-        refreshUI(ctx);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Cold-reset ${androidPackage}: removed SecureStore + MMKV user store and force-stopped. Next launch is a signed-out first run.`,
-            },
-          ],
-          details: { action: "cold-reset" },
-        };
-      }
-      // launch: open --relaunch, then crash-scan the startup window.
-      const marker = await device.markLog();
-      await device.launch();
-      try {
-        const state = await device.appstate();
-        lastForeground = state.package || undefined;
-        deviceReady = true;
-      } catch {
-        /* foreground read is best-effort right after launch */
-      }
-      refreshUI(ctx);
-      const crash = await scanForCrash(device, marker || undefined, roleLog);
-      if (!crash.ok) {
-        guardTrip = { kind: "crash", detail: `${crash.reason}\n${crash.lines}` };
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Launched ${androidPackage}, but the CRASH-GUARD tripped at startup (new ${crashLogTag} errors):\n${crash.lines}`,
-            },
-          ],
-          details: { action: "launch", crashGuard: "tripped" },
-        };
-      }
-      return {
-        content: [{ type: "text", text: `Launched ${androidPackage}.` }],
-        details: { action: "launch" },
-      };
-    },
-  });
-
-  // 8) logcat — pull recent crash-tag error lines for the failure report.
-  pi.registerTool({
-    name: "logcat",
-    label: `Logcat (${crashLogTag})`,
-    description:
-      "Pull recent " + crashLogTag + " log lines from the device — the silent app " +
-      "errors observe/look can't see (e.g. red-box / unhandled exceptions). Use this " +
-      "when building a failure report or diagnosing why a screen looks wrong.",
-    promptSnippet: "Pull recent " + crashLogTag + " log lines for diagnosis / the failure report.",
-    parameters: Type.Object({
-      lines: Type.Optional(
-        Type.Number({ description: "How many recent lines to return (default 80)." }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeCtx = ctx;
-      const max = params.lines && params.lines > 0 ? Math.floor(params.lines) : 80;
-      const out = await device.logcat({ max });
-      const body = out.length ? out.split("\n").slice(-max).join("\n") : `(no ${crashLogTag} lines)`;
-      return {
-        content: [{ type: "text", text: `Recent ${crashLogTag} log:\n${body}` }],
-        details: { lines: body.split("\n").length },
-      };
+    setGuardTrip: (v) => {
+      guardTrip = v;
     },
   });
 
