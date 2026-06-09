@@ -1,0 +1,17 @@
+{
+  "name": "pi-e2e-tester",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone agentic end-to-end tester for mobile/web apps, built on pi (hub + android/web/ios spokes).",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.78.1",
+    "@earendil-works/pi-tui": "^0.78.1",
+    "@sinclair/typebox": "^0.34.49",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

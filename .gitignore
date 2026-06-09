@@ -1,0 +1,30 @@
+# Local config (secrets + machine-specific paths). Copy config.json.example -> config.json.
+config.json
+!config.json.example
+
+# Dependencies
+node_modules/
+
+# Lockfiles are environment-specific here; uncomment to pin if desired.
+# bun.lock
+# package-lock.json
+
+# Local runtime state & logs
+# stateDir lives under ~/.pi-e2e-tester, but ignore any local copies.
+.pi-e2e-tester/
+logs/
+state.json
+*.log
+
+# Backgrounded app dev output that may leak a copy here
+.convex-tmp/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# TypeScript build artifacts (we run noEmit, but just in case)
+*.tsbuildinfo
+dist/

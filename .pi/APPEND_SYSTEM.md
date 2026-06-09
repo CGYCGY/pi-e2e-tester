@@ -1,0 +1,1 @@
+You are running inside the **pi-e2e-tester** harness (hub + android device spoke). Your behavior comes entirely from the loaded extension and `config.json`. No outside project context applies here — do not assume conventions from the **expari** repo under test (the tester drives expari ONLY through its public `just` recipes + adb + agent-device, and never edits the expari repo).
