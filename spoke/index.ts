@@ -40,6 +40,7 @@ import {
   getDevice,
   getPort,
   getRoleFromEnv,
+  getRoleIcon,
   getTarget,
 } from "../shared/config.ts";
 import { createLogger, type Logger } from "../shared/log.ts";
@@ -128,6 +129,7 @@ export default function spokeExtension(pi: ExtensionAPI) {
   // ── Mutable spoke runtime (lives in extension memory, NOT LLM context) ───────
   let halted = false; // set on needs-device until a resume arrives
   let readyState: SpokeReadyState = "ready";
+  let lastReportedState: SpokeReadyState | undefined;
   let server: TransportServer | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let activeCtx: ExtensionContext | undefined; // last ctx for UI + usage reads
@@ -190,15 +192,16 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     const pct =
       usage && usage.percent != null ? ` (${Math.round(usage.percent)}%)` : "";
     const model = ctx.model?.id ?? "no-model";
-    const dot = halted
-      ? theme.fg("error", "●")
-      : deviceReady
+    const dot =
+      readyState === "ready"
         ? theme.fg("success", "●")
-        : theme.fg("warning", "●");
+        : readyState === "wrong-target"
+          ? theme.fg("warning", "●")
+          : theme.fg("error", "●");
     const fg = lastForeground ? ` | ${lastForeground}` : "";
     ctx.ui.setStatus(
       "spoke",
-      `${dot} AND${fg} | ${model} | ctx ${used}${pct} | $${cumulativeCost.toFixed(3)}`,
+      `${dot} ${getRoleIcon(role)}${fg} | ${model} | ctx ${used}${pct} | $${cumulativeCost.toFixed(3)}`,
     );
   };
 
@@ -216,6 +219,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       role,
       connected: true,
       deviceReady,
+      readyState,
       foregroundPackage: lastForeground,
       model: activeCtx?.model?.id,
       contextPercent: usage?.percent ?? undefined,
@@ -272,47 +276,67 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   // ── Status / readiness reporting ─────────────────────────────────────────────
   const reportStatus = (state: SpokeReadyState, detail?: string): void => {
     readyState = state;
-    void postToHub(
-      { type: "status", from: role, ts: Date.now(), state, detail },
-      { port: hubPort() },
-    ).catch((err) => roleLog.warn("status post failed", { err: String(err) }));
+    // Derive dependent flags from state so verifyReady callers don't need to
+    // set them separately.
+    deviceReady = state !== "needs-device" && state !== "error";
+    halted = state === "needs-device" || state === "error";
+    // Transition-gated: only POST on state change to avoid spamming the hub
+    // while the device is absent. refreshUI always runs; heartbeat carries
+    // readyState continuously so the hub still sees current state.
+    if (state !== lastReportedState) {
+      lastReportedState = state;
+      void postToHub(
+        { type: "status", from: role, ts: Date.now(), state, detail },
+        { port: hubPort() },
+      ).catch((err) => roleLog.warn("status post failed", { err: String(err) }));
+    }
     refreshUI();
   };
 
   /**
-   * Self-check readiness: is the device reachable (adb sees the pinned serial)
-   * and is the dev app foreground? Updates deviceReady/lastForeground and reports
-   * a coarse SpokeReadyState. This answers auto-connect, resume, and the hub's
-   * status ping.
+   * Self-check readiness: device reachable AND dev app foreground?
+   * opts.launch=true: when reachable but app not foreground, launch it and recheck.
+   * Pass { launch: true } on establish-paths; omit at idle to not fight the user.
    */
-  const verifyReady = async (): Promise<void> => {
+  const verifyReady = async (opts?: { launch?: boolean }): Promise<void> => {
     try {
       const reachable = await device.isReachable();
-      deviceReady = reachable;
       if (!reachable) {
-        halted = true;
         reportStatus("needs-device", `device ${deviceCfg.serial} not reachable (USB detached?).`);
         return;
       }
-      // Device is up; note the current foreground (for the widget + wrong-target view).
+      // Device is up; read current foreground.
       try {
         const state = await device.appstate();
         lastForeground = state.package || undefined;
       } catch {
         lastForeground = undefined;
       }
-      halted = false;
       markConnected(role);
-      if (lastForeground && lastForeground !== androidPackage) {
+
+      const onTarget = lastForeground === androidPackage;
+      if (!onTarget && opts?.launch) {
+        // Auto-open the dev app, then recheck foreground once.
+        try {
+          await device.launch();
+          const state = await device.appstate();
+          lastForeground = state.package || undefined;
+        } catch {
+          /* launch failed — fall through to wrong-target */
+        }
+      }
+
+      if (lastForeground === androidPackage) {
+        reportStatus("ready", `device ${deviceCfg.serial} reachable; app "${androidPackage}".`);
+      } else {
         reportStatus(
           "wrong-target",
-          `foreground is "${lastForeground}", not the dev app "${androidPackage}".`,
+          `foreground is "${lastForeground ?? "(unknown)"}", not the dev app "${androidPackage}".`,
         );
-        return;
       }
-      reportStatus("ready", `device ${deviceCfg.serial} reachable; app "${androidPackage}".`);
     } catch (err) {
       roleLog.error("verifyReady failed", { err: String(err) });
+      deviceReady = false;
       reportStatus("error", `verification error: ${(err as Error).message}`);
     }
   };
@@ -497,7 +521,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
         // User fixed the problem (reattached the device): re-verify readiness.
         resume: () => {
           halted = false;
-          void verifyReady();
+          void verifyReady({ launch: true });
           return { ok: true };
         },
         // Hub-requested shutdown (cascade): ack first, then shut down on a short
@@ -525,6 +549,18 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       },
     });
     roleLog.info("spoke transport listening", { port: server.port, role });
+  };
+
+  // Heartbeat tick: when halted (device absent / red), re-attempt readiness on
+  // each beat so plugging the device back in auto-recovers without a manual command.
+  // verifyReady returns early at needs-device BEFORE launching, so launch() is
+  // never called while the phone is absent — only once it becomes reachable again.
+  const heartbeatTick = (): void => {
+    if (halted) {
+      void verifyReady({ launch: true }).then(() => sendHeartbeat());
+    } else {
+      sendHeartbeat();
+    }
   };
 
   // ── Register / heartbeat lifecycle ───────────────────────────────────────────
@@ -558,12 +594,12 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     await startServer();
     announce();
     // Auto-connect: on start, self-check device reachability + foreground.
-    await verifyReady();
+    await verifyReady({ launch: true });
 
-    // Heartbeat loop.
+    // Heartbeat loop (self-healing tick — see heartbeatTick).
     if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(sendHeartbeat, defaults.heartbeatIntervalMs);
-      sendHeartbeat();
+      heartbeatTimer = setInterval(heartbeatTick, defaults.heartbeatIntervalMs);
+      heartbeatTick();
     }
     refreshUI(ctx);
   });
@@ -631,7 +667,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     handler: async (_args, ctx) => {
       activeCtx = ctx;
       halted = false;
-      await verifyReady();
+      await verifyReady({ launch: true });
       refreshUI(ctx);
     },
   });
@@ -642,7 +678,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       activeCtx = ctx;
       const s = buildStatus();
       ctx.ui.notify(
-        `AND: ${readyState}${halted ? " (HALTED)" : ""} | device=${
+        `${getRoleIcon(role)}: ${readyState}${halted ? " (HALTED)" : ""} | device=${
           deviceReady ? "ready" : "down"
         } | fg=${lastForeground ?? "?"} | $${s.cost?.toFixed(3) ?? "0"}`,
         halted ? "warning" : "info",
