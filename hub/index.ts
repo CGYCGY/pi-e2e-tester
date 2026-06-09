@@ -138,8 +138,9 @@ export default function (pi: ExtensionAPI) {
     opts: { cwd?: string } = {},
   ): { logPath: string; pid?: number } {
     const logPath = join(getLogsDirForApp(), `${logName}.log`);
-    // Append (not truncate): keep prior bring-up history for diagnosis.
-    const fd = openSync(logPath, "a");
+    // "w" not "a": waitForReady scans the WHOLE file, so a prior run's ready line
+    // would match instantly and report ready before this run's server is up.
+    const fd = openSync(logPath, "w");
     log.info(`background -> ${logName}.log`, { command, cwd: opts.cwd });
     try {
       const child = spawn("bash", ["-lic", command], {
