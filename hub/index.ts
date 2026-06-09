@@ -111,6 +111,8 @@ export default function (pi: ExtensionAPI) {
   let renderTimer: ReturnType<typeof setInterval> | null = null;
   /** Guard so the auto-bring-up runs at most once per session. */
   let broughtUp = false;
+  /** Latched to true the first time the spoke reaches GREEN; re-armed on disconnect. */
+  let readyAnnounced = false;
 
   // Capture an ExtensionContext for use by timers / async transport handlers.
   let lastCtx: ExtensionContext | null = null;
@@ -314,9 +316,46 @@ export default function (pi: ExtensionAPI) {
   /* ────────────────────── auto-orchestration ─────────────────────── */
 
   /**
+   * The single owner of the "Ready to test" announcement. Called after every
+   * heartbeat and status update. Latches on first GREEN; re-arms on disconnect so
+   * an unplug→replug re-announces.
+   */
+  function maybeAnnounceReady(): void {
+    if (registry.isReady() && !readyAnnounced) {
+      readyAnnounced = true;
+      markConnected(SPOKE_ROLE);
+      notify("bring-up complete — android spoke ready (dev app foreground). Ready to test.");
+      if (lastCtx) rerender(lastCtx);
+    } else if (!registry.isReady() && readyAnnounced) {
+      // Re-arm so the next time the spoke reaches green it announces again.
+      readyAnnounced = false;
+    }
+  }
+
+  /**
+   * Poll until pred() is true within budgetMs. Returns true if pred hit, false on
+   * timeout. A cold android spoke (new WSL window + agent-device init) can take
+   * tens of seconds, so we poll rather than race a fixed timer.
+   */
+  async function waitForSpoke(pred: () => boolean, budgetMs: number): Promise<boolean> {
+    const poll = getDefaults().readyPollIntervalMs;
+    const started = Date.now();
+    while (Date.now() - started < budgetMs) {
+      if (pred()) return true;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => {
+        const t = setTimeout(r, poll);
+        t.unref?.();
+      });
+    }
+    return false;
+  }
+
+  /**
    * The full automatic bring-up, run once at session_start (the spec REQUIRES it
    * fully automatic — the user never signals ready). Each step logs a milestone;
-   * a step that times out STOPS the sequence with a clear report.
+   * a host-side failure (dev servers) STOPS the sequence; USB failure is a WARNING
+   * and we continue — the spoke self-heals once the device is plugged in.
    */
   async function autoBringUp(): Promise<void> {
     if (broughtUp) return;
@@ -328,12 +367,16 @@ export default function (pi: ExtensionAPI) {
       const usb = await usbAttach();
       log.info("bring-up usb_attach", usb);
       if (!usb.ok) {
-        notify(`bring-up STOPPED at usb_attach: ${usb.detail}`, "error");
-        return;
+        // Not a hard stop: the spoke comes up needs-device and self-heals via /reconnect.
+        notify(
+          `usb attach not ready: ${usb.detail} — continuing; plug in the device and run /reconnect`,
+          "warning",
+        );
+      } else {
+        notify(`usb attached: ${usb.detail}`);
       }
-      notify(`usb attached: ${usb.detail}`);
 
-      // 2) expari dev servers (convex + metro).
+      // 2) expari dev servers (convex + metro) — host-side; failure is a hard stop.
       notify("bring-up: starting expari dev servers (convex + metro)…");
       const dev = await devUp();
       log.info("bring-up dev_up", { ok: dev.ok });
@@ -347,51 +390,33 @@ export default function (pi: ExtensionAPI) {
       notify("bring-up: spawning android spoke…");
       spawnSpoke(resolvedHubPort, log);
 
-      // 4) Wait for the spoke to register / become ready (heartbeat-based).
-      const ok = await waitForSpokeReady();
-      if (!ok) {
-        notify(
-          `bring-up: android spoke did not connect within ` +
-            `${Math.round(getDefaults().spokeConnectTimeoutMs / 1000)}s — ` +
-            `check the spoke window or its log.`,
-          "warning",
-        );
-        return;
+      // 4) Wait for the spoke to reach GREEN (dev app foreground) within the budget.
+      //    The ready-latch (maybeAnnounceReady) owns the "Ready to test" message.
+      setStatus("waiting for spoke…");
+      const budget = getDefaults().spokeConnectTimeoutMs;
+      const green = await waitForSpoke(() => registry.isReady(), budget);
+      setStatus(undefined);
+      log.info("bring-up spoke wait done", { green, connected: registry.isConnected() });
+
+      if (!green) {
+        if (registry.isConnected()) {
+          notify(
+            "android spoke up but device not ready — plug in the device and run /reconnect.",
+            "warning",
+          );
+        } else {
+          notify(
+            `android spoke did not connect within ${Math.round(budget / 1000)}s — ` +
+              "check the spoke window / its log.",
+            "warning",
+          );
+        }
       }
-      markConnected(SPOKE_ROLE);
-      notify("bring-up complete — android spoke connected. Ready to test.");
-      log.info("bring-up complete");
+      // "Ready to test" is emitted by maybeAnnounceReady() via heartbeat/status handlers.
     } finally {
       if (lastCtx?.hasUI) setBusyIndicator(lastCtx, false);
       if (lastCtx) rerender(lastCtx);
     }
-  }
-
-  /**
-   * Poll until the spoke is connected (a register/heartbeat landed) within the
-   * spokeConnectTimeoutMs budget. A cold android spoke (new WSL window +
-   * agent-device init) can take tens of seconds, so we poll rather than race a
-   * fixed timer.
-   */
-  async function waitForSpokeReady(): Promise<boolean> {
-    const budget = getDefaults().spokeConnectTimeoutMs;
-    const poll = getDefaults().readyPollIntervalMs;
-    const started = Date.now();
-    setStatus("waiting for spoke…");
-    while (Date.now() - started < budget) {
-      if (registry.isConnected()) {
-        setStatus(undefined);
-        if (lastCtx) rerender(lastCtx);
-        return true;
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => {
-        const t = setTimeout(r, poll);
-        t.unref?.();
-      });
-    }
-    setStatus(undefined);
-    return false;
   }
 
   /* ─────────────────────── transport handlers ────────────────────── */
@@ -414,6 +439,7 @@ export default function (pi: ExtensionAPI) {
         },
         heartbeat: (m) => {
           registry.onHeartbeat(m.status);
+          maybeAnnounceReady();
           return { ok: true };
         },
         intentResult: (m) => {
@@ -435,13 +461,13 @@ export default function (pi: ExtensionAPI) {
           return { ok: true };
         },
         status: (m) => {
-          const deviceReady = m.state === "ready";
-          registry.onStatus(deviceReady, m.detail ?? m.state);
+          registry.onStatus(m.state, m.detail ?? m.state);
           if (lastCtx?.hasUI) {
             const sev = m.state === "ready" ? "info" : "warning";
             notify(`android: ${m.state}${m.detail ? ` — ${m.detail}` : ""}`, sev);
             rerender(lastCtx);
           }
+          maybeAnnounceReady();
           return { ok: true };
         },
         onError: (err, raw) =>
@@ -593,6 +619,38 @@ export default function (pi: ExtensionAPI) {
       }
       const res = await resumeSpoke(registry.port());
       ctx.ui.notify(`continue android: ${res.detail}`, res.ok ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("reconnect", {
+    description: "Re-attach USB + bring the android spoke back to ready (run after plugging the device in).",
+    handler: async (_args, ctx) => {
+      lastCtx = ctx;
+      notify("reconnecting — re-attaching USB…");
+      const usb = await usbAttach();
+      notify(usb.detail, usb.ok ? "info" : "warning");
+
+      if (!registry.isConnected()) {
+        // Spoke process is gone — spawn fresh and wait for it to connect.
+        notify("android spoke not connected — spawning…");
+        spawnSpoke(resolvedHubPort, log);
+        setStatus("waiting for spoke…");
+        await waitForSpoke(() => registry.isConnected(), getDefaults().spokeConnectTimeoutMs);
+        setStatus(undefined);
+      } else {
+        // Spoke is alive — ask it to re-verify readiness (it will auto-launch the app).
+        const res = await resumeSpoke(registry.port());
+        notify(`resume android: ${res.detail}`, res.ok ? "info" : "warning");
+      }
+
+      // maybeAnnounceReady() will fire "Ready to test" via incoming heartbeat/status.
+      notify(
+        registry.isReady()
+          ? "android ready."
+          : "android still not ready — check the device / spoke window.",
+        registry.isReady() ? "info" : "warning",
+      );
+      rerender(ctx);
     },
   });
 

@@ -3,8 +3,8 @@
  * android spoke + no chat-lock concept).
  *
  * - The BELOW-EDITOR widget shows the android spoke status, ONLY when connected:
- *     [AND ●  model | ctxused/max (x%) | $cost | <foreground>]
- *   The dot is green when the device is reachable (deviceReady), amber otherwise.
+ *     [<icon> ●  model | ctxused/max (x%) | $cost | <foreground>]
+ *   Dot: green=ready (app foreground), amber=wrong-target, red=needs-device/error.
  * - The hub's own STATUS SEGMENTS (model | ctx used/max (x%) | cost) live in a
  *   custom 2-line footer via ctx.ui.setFooter (REPLACES pi's built-in footer).
  *
@@ -14,6 +14,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+import { getRoleIcon } from "../shared/config.ts";
 import { fmtPct, fmtTokens } from "./format.ts";
 import type { SpokeRecord } from "./spokes.ts";
 
@@ -21,16 +22,20 @@ import type { SpokeRecord } from "./spokes.ts";
 export const WIDGET_KEY = "expari-spoke";
 export const STATUS_KEY = "expari-hub";
 
-/** Short label for the android spoke in the widget. */
-const LABEL = "AND";
-
 /** One spoke segment string for the widget (assumes the spoke is connected). */
 function spokeSegment(rec: SpokeRecord, theme: ExtensionContext["ui"]["theme"]): string {
   const s = rec.status;
-  // Green dot when the device is reachable; amber while connected-but-not-ready.
-  const dotColor = s.deviceReady ? "success" : "warning";
+  // Dot color driven by readyState: ready=green, wrong-target=amber, anything else=red.
+  const dotColor =
+    rec.readyState === "ready"
+      ? "success"
+      : rec.readyState === "wrong-target"
+        ? "warning"
+        : rec.readyState === "needs-device" || rec.readyState === "error"
+          ? "error"
+          : ("warning" as never); // unknown state — treat as connecting
   const dot = theme.fg(dotColor as never, "●");
-  const label = theme.fg("accent" as never, LABEL);
+  const label = theme.fg("accent" as never, getRoleIcon(s.role));
 
   const bits: string[] = [];
   if (s.model) bits.push(theme.fg("muted" as never, s.model));
@@ -150,10 +155,11 @@ export function setBusyIndicator(ctx: ExtensionContext, busy: boolean): void {
 export function statusSummary(records: SpokeRecord[]): string[] {
   return records.map((r) => {
     const s = r.status;
+    const icon = getRoleIcon(s.role);
     const conn = s.connected ? "connected" : "disconnected";
-    const dev = s.connected ? (s.deviceReady ? "device-ready" : "device-down") : "-";
-    const port = r.port > 0 ? ` :${r.port}` : "";
+    const state = r.readyState;
+    const port = r.port > 0 ? `:${r.port}` : "";
     const detail = r.readyDetail ? ` (${r.readyDetail})` : "";
-    return `${LABEL}${port}: ${conn}, ${dev}${detail}`;
+    return `${icon}${port}: ${conn}, ${state}${detail}`;
   });
 }

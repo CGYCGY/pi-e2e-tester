@@ -31,7 +31,7 @@ import {
 } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import { postToSpoke } from "../shared/transport.ts";
-import type { SpokeRole, SpokeStatus } from "../shared/types.ts";
+import type { SpokeReadyState, SpokeRole, SpokeStatus } from "../shared/types.ts";
 
 /** The only spoke role in phase 1 (web/ios join later). */
 export const SPOKE_ROLE: SpokeRole = "android";
@@ -44,6 +44,8 @@ export interface SpokeRecord {
   role: SpokeRole;
   /** Last status snapshot received on a heartbeat (or synthesized). */
   status: SpokeStatus;
+  /** Coarse readiness state — source of truth for the colored dot + ready gate. */
+  readyState: SpokeReadyState;
   /** The spoke's RESOLVED transport port (from its register message); 0 = unknown. */
   port: number;
   /** Epoch ms of the last heartbeat (0 = never). */
@@ -70,6 +72,7 @@ export class SpokeRegistry {
     this.record = {
       role: SPOKE_ROLE,
       status: emptyStatus(SPOKE_ROLE),
+      readyState: "needs-device",
       port: 0,
       lastHeartbeat: 0,
       lastRegister: 0,
@@ -104,12 +107,15 @@ export class SpokeRegistry {
     const rec = this.record;
     rec.lastHeartbeat = Date.now();
     rec.status = { ...status, connected: true };
+    rec.readyState = status.readyState ?? (status.deviceReady ? "ready" : "needs-device");
   }
 
-  /** Record a readiness (StatusMessage) result for the widget. */
-  onStatus(deviceReady: boolean, detail?: string): void {
+  /** Record a readiness (StatusMessage) result — the spoke's self-assessed state. */
+  onStatus(state: SpokeReadyState, detail?: string): void {
     const rec = this.record;
-    rec.status.deviceReady = deviceReady;
+    rec.readyState = state;
+    // device is reachable in both ready and wrong-target; absent only for needs-device/error
+    rec.status.deviceReady = state === "ready" || state === "wrong-target";
     rec.readyDetail = detail;
   }
 
@@ -124,7 +130,10 @@ export class SpokeRegistry {
     const alive = rec.lastHeartbeat > 0 && now - rec.lastHeartbeat <= timeout;
     if (alive !== rec.status.connected) {
       rec.status.connected = alive;
-      if (!alive) rec.status.deviceReady = false;
+      if (!alive) {
+        rec.status.deviceReady = false;
+        rec.readyState = "needs-device";
+      }
       this.log.info(`spoke ${SPOKE_ROLE} -> ${alive ? "connected" : "disconnected"}`);
       return true;
     }
@@ -136,6 +145,11 @@ export class SpokeRegistry {
     const rec = this.record;
     const timeout = getDefaults().heartbeatTimeoutMs;
     return rec.lastHeartbeat > 0 && Date.now() - rec.lastHeartbeat <= timeout;
+  }
+
+  /** True iff the spoke is heartbeating AND has reported the dev app is foreground (GREEN). */
+  isReady(): boolean {
+    return this.record.status.connected && this.record.readyState === "ready";
   }
 
   /** The spoke's resolved port, or the preferred config port if not yet known. */
@@ -222,5 +236,5 @@ export async function shutdownSpoke(port: number, reason: string): Promise<void>
 }
 
 /** Just to silence unused-import linters across re-exports. */
-export type { SpokeRole, SpokeStatus };
+export type { SpokeReadyState, SpokeRole, SpokeStatus };
 export { getHost };
