@@ -60,7 +60,7 @@ spoke role="android":
     @case '{{role}}' in android) ;; *) echo "role must be android (web/ios are phase 2)"; exit 2;; esac
     "{{launch_spoke}}" '{{role}}'
 
-# Proven spawn (docs/spawning-wsl-windows.md): PowerShell Start-Process wsl.exe,
+# Proven spawn: PowerShell Start-Process wsl.exe,
 # wsl --cd sets cwd, bash -lic gives PATH/TTY. The "<launcher> <role>" payload is
 # double-quoted so bash -c runs it as one command string.
 # Open the android spoke in its own visible WSL window.

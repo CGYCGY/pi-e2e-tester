@@ -95,9 +95,8 @@ just clean          # remove state.json + wipe logs
 ```
 
 All recipes read `config.json` via `jq`. `launch-spoke.sh <role>` is the single
-source of truth for starting a spoke; the spawn mechanism (proven
-`Start-Process wsl.exe`) is documented in
-[docs/spawning-wsl-windows.md](./docs/spawning-wsl-windows.md).
+source of truth for starting a spoke, using the proven
+`Start-Process wsl.exe` spawn.
 
 > **Phase 1 note:** `just hub` / `just spawn` will report that `hub/index.ts` /
 > `spoke/index.ts` don't exist yet — those drivers are phase 2. The transport,

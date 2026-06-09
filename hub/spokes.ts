@@ -146,7 +146,7 @@ export class SpokeRegistry {
 
 /**
  * Spawn the android spoke window via the proven PowerShell -> wsl.exe ->
- * launch-spoke.sh command (docs/spawning-wsl-windows.md). Fire-and-forget —
+ * launch-spoke.sh command. Fire-and-forget —
  * liveness comes from the heartbeat, not this PID.
  *
  * PORT PROPAGATION: launch-spoke.sh HONOURS an inherited HUB_PORT env, so we pass
