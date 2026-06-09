@@ -31,6 +31,7 @@ import type {
   IntentMessage,
   IntentResultMessage,
   RegisterMessage,
+  ResetMessage,
   ResumeMessage,
   Role,
   ShutdownMessage,
@@ -60,6 +61,7 @@ export interface TransportHandlers {
   intentResult?: (msg: IntentResultMessage) => unknown | Promise<unknown>;
   status?: (msg: StatusMessage) => unknown | Promise<unknown>;
   resume?: (msg: ResumeMessage) => unknown | Promise<unknown>;
+  reset?: (msg: ResetMessage) => unknown | Promise<unknown>;
   shutdown?: (msg: ShutdownMessage) => unknown | Promise<unknown>;
   /** Called for any type without a specific handler. */
   onUnhandled?: (msg: TransportMessage) => unknown | Promise<unknown>;
@@ -132,6 +134,8 @@ async function dispatch(
       return handlers.status?.(msg) ?? handlers.onUnhandled?.(msg);
     case "resume":
       return handlers.resume?.(msg) ?? handlers.onUnhandled?.(msg);
+    case "reset":
+      return handlers.reset?.(msg) ?? handlers.onUnhandled?.(msg);
     case "shutdown":
       return handlers.shutdown?.(msg) ?? handlers.onUnhandled?.(msg);
     default: {

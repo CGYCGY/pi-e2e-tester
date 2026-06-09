@@ -219,6 +219,27 @@ export async function resumeSpoke(port: number): Promise<SpokeRequestResult> {
 }
 
 /**
+ * FRESH TEST START (hub /reset). 20s timeout: the spoke awaits an adb run-as rm
+ * sweep + force-stop before it acks. The spoke echoes a detail string in the body.
+ */
+export async function resetSpoke(port: number): Promise<SpokeRequestResult> {
+  try {
+    const res = await postToSpoke(
+      SPOKE_ROLE,
+      { type: "reset", from: "hub", ts: Date.now() },
+      { port, timeoutMs: 20000 },
+    );
+    const detail = (res.body as { detail?: string } | undefined)?.detail;
+    return {
+      ok: res.ok,
+      detail: res.ok ? detail ?? "reset" : `spoke returned ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, detail: `unreachable: ${(err as Error).message}` };
+  }
+}
+
+/**
  * SHUTDOWN CASCADE: ask the spoke to shut down (close agent-device + WSL window)
  * before the hub tears down its own transport. Fire-and-forget — a spoke already
  * exiting may not ack cleanly, which is expected, not an error.

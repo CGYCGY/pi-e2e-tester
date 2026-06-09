@@ -496,6 +496,47 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     }
   };
 
+  // FRESH TEST START (hub /reset): cold-reset the dev app + shed LLM context.
+  const handleReset = async (): Promise<{ ok: boolean; detail: string }> => {
+    // Refuse mid-intent: shedding context during a turn would orphan it.
+    if (activeIntent) {
+      roleLog.warn("reset rejected: intent in flight");
+      return { ok: false, detail: "intent in flight — reset after it finishes" };
+    }
+    // Best-effort: a device failure still lets us shed context below.
+    let deviceDetail = "app cold-reset";
+    try {
+      await device.coldReset();
+      lastForeground = undefined;
+    } catch (err) {
+      deviceDetail = `cold-reset failed: ${(err as Error).message}`;
+      roleLog.warn("reset: coldReset failed", { err: String(err) });
+    }
+    guardTrip = null;
+    // compact(), not newSession(): newSession is command-context-only by pi's
+    // design, and this runs in a transport handler. (Same primitive pi-4b-tester
+    // uses for its programmatic reset.) SPOKE_RULES re-inject every turn anyway.
+    let contextDetail = "context kept (little to shed)";
+    try {
+      const usage = activeCtx?.getContextUsage();
+      if (activeCtx && usage?.tokens != null && usage.tokens > 2000) {
+        activeCtx.compact({
+          customInstructions:
+            "A brand-new, UNRELATED test is starting. Discard everything about the " +
+            "previous test — its steps, observations, taps, and verdict are over and " +
+            "must NOT influence the next one. Summarize to a single line: 'fresh test start'.",
+          onError: (e) => roleLog.warn("reset: compaction failed", { err: e.message }),
+        });
+        contextDetail = "context cleared";
+      }
+    } catch (err) {
+      roleLog.warn("reset: compact failed", { err: String(err) });
+    }
+    roleLog.info("spoke reset", { device: deviceDetail, context: contextDetail });
+    refreshUI();
+    return { ok: true, detail: `${contextDetail}; ${deviceDetail}` };
+  };
+
   // ── Hub port resolution (HUB_PORT spawn env = hub's RESOLVED port) ────────────
   // The hub passes its own resolved port via the HUB_PORT env at spawn; honour it,
   // else fall back to the preferred config port. All hub POSTs route through here.
@@ -524,6 +565,9 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
           void verifyReady({ launch: true });
           return { ok: true };
         },
+        // FRESH TEST START (hub /reset) — the explicit scenario boundary;
+        // messenger otherwise CONTINUES by default. See handleReset.
+        reset: () => handleReset(),
         // Hub-requested shutdown (cascade): ack first, then shut down on a short
         // delay so the HTTP 200 flushes before process.exit.
         shutdown: (msg) => {

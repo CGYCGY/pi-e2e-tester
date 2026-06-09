@@ -34,6 +34,7 @@ export type TransportMessage =
   | IntentResultMessage
   | StatusMessage
   | ResumeMessage
+  | ResetMessage
   | ShutdownMessage;
 
 export interface TransportBase {
@@ -119,6 +120,18 @@ export interface StatusMessage extends TransportBase {
 /** hub -> spoke: user fixed the problem; re-verify readiness and continue. */
 export interface ResumeMessage extends TransportBase {
   type: "resume";
+  from: "hub";
+}
+
+/**
+ * hub -> spoke: FRESH TEST START. Clear the spoke's LLM context to the post-setup
+ * baseline (SPOKE_RULES re-inject every turn, so newSession lands there) AND
+ * cold-reset the dev app on the device. This is the explicit boundary between two
+ * unrelated messenger scenarios — messenger CONTINUES by default, so the user
+ * fires this only when starting a genuinely new test.
+ */
+export interface ResetMessage extends TransportBase {
+  type: "reset";
   from: "hub";
 }
 

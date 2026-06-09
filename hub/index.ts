@@ -56,6 +56,7 @@ import {
   waitForReady,
 } from "./ready.ts";
 import {
+  resetSpoke,
   resumeSpoke,
   shutdownSpoke,
   SpokeRegistry,
@@ -619,6 +620,22 @@ export default function (pi: ExtensionAPI) {
       }
       const res = await resumeSpoke(registry.port());
       ctx.ui.notify(`continue android: ${res.detail}`, res.ok ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("reset", {
+    description: "Fresh test start: clear the android spoke's context + cold-reset the dev app",
+    handler: async (_args, ctx) => {
+      lastCtx = ctx;
+      if (!registry.isConnected()) {
+        ctx.ui.notify("android spoke is not connected.", "warning");
+        return;
+      }
+      const res = await resetSpoke(registry.port());
+      ctx.ui.notify(
+        res.ok ? `↺ reset android: ${res.detail}` : `reset failed: ${res.detail}`,
+        res.ok ? "info" : "warning",
+      );
     },
   });
 
