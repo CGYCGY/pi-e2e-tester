@@ -138,15 +138,38 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // True iff any process matches (pgrep exits 0 on match, 1 on none). Never rejects.
+  function isRunning(pattern: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      try {
+        const r = spawn("pgrep", ["-f", pattern], { stdio: "ignore" });
+        r.on("error", () => resolve(false));
+        r.on("close", (code) => resolve(code === 0));
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
   // usbipd.exe is a WINDOWS binary invoked from WSL; --auto-attach keeps it
-  // re-attaching across device replugs.
+  // re-attaching across device replugs. We NEVER tear it down: it spawns a ROOT
+  // helper the user-owned hub can't kill (and usbipd detach won't reap it), so we
+  // make this idempotent instead — if a monitor for this busid already exists
+  // (matches BOTH the usbipd.exe wrapper and the usbip-auto-attach helper), reuse
+  // it rather than stacking a second. The adb probe in waitForReady is what
+  // actually confirms the device, so a reused monitor verifies the same way.
   async function usbAttach(): Promise<{ ok: boolean; detail: string }> {
     const android = getAndroidPlatform();
     const device = android.device;
     setStatus("usb_attach…");
-    const cmd =
-      `${device.usbipd} attach --wsl --busid ${device.busid} --auto-attach`;
-    const { logPath } = backgroundToLog(cmd, "usbipd");
+    const logPath = join(getLogsDirForApp(), "usbipd.log");
+    if (await isRunning(`busid ${device.busid}`)) {
+      log.info("usb auto-attach already running — reusing", { busid: device.busid });
+    } else {
+      const cmd =
+        `${device.usbipd} attach --wsl --busid ${device.busid} --auto-attach`;
+      backgroundToLog(cmd, "usbipd");
+    }
     const res = await waitForReady({
       label: "usb",
       logPath,
