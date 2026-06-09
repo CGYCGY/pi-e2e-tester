@@ -1,26 +1,11 @@
-/**
- * hub/index.ts — the HUB extension entry point for pi-e2e-tester.
- *
- * The user-facing orchestrator. It:
- *   - validates the expari target dir, then runs the localhost transport server
- *     (receives register/heartbeat/intent_result/status from the android spoke),
- *   - tracks spoke liveness via heartbeats + renders a below-editor widget + a
- *     custom 2-line footer (model | ctx | cost),
- *   - AUTO-BRINGS-UP the whole stack on startup with ZERO user signal:
- *       usb_attach -> dev_up -> spawn android spoke (HUB_PORT=<resolved>) -> wait
- *       for the spoke's register / ready status,
- *   - exposes the bring-up as explicit tools too (usb_attach / dev_up / dev_down),
- *   - exposes `messenger({target, intent})` — the ONE door in phase 1: POST a
- *     natural-language intent to the spoke, correlate the intent_result by
- *     requestId, return { verdict, text }.
- *
- * The hub CANNOT see or touch the phone. Every android test goes through the spoke
- * via `messenger`. Readiness detection is DETERMINISTIC NODE (zero LLM tokens):
- * the hub backgrounds expari's PLAIN recipes + usbipd attach into <logsDir>/*.log
- * and tails them for the real ready signal (log-regex OR probe backstop).
- *
- * Modeled on pi-4b-tester/hub/{index,spokes,ui}.ts — same pi extension API usage.
- */
+// hub/index.ts — the HUB extension entry point.
+//
+// The hub CANNOT see or touch the phone — every android test goes through the
+// spoke via `messenger`. It auto-brings-up the whole stack at startup with ZERO
+// user signal (usb_attach -> dev_up -> spawn spoke -> wait for register/ready).
+// Readiness detection is DETERMINISTIC NODE (zero LLM tokens): the hub backgrounds
+// the app's PLAIN recipes + usbipd attach into <logsDir> and tails them for the
+// real ready signal (log-regex OR probe backstop).
 
 import { spawn } from "node:child_process";
 import { openSync } from "node:fs";
@@ -31,22 +16,23 @@ import { Text } from "@earendil-works/pi-tui";
 
 import {
   assertTargetValid,
+  getAndroidPlatform,
+  getConfiguredPlatforms,
   getDefaults,
-  getDevice,
   getHost,
-  getLogsDir,
+  getLogsDirForApp,
   getPort,
   getReadiness,
   getTarget,
   getTestsDirs,
 } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
-import { markConnected } from "../shared/state.ts";
+import { ensureLogsDir, markConnected } from "../shared/state.ts";
 import {
   createTransportServer,
   type TransportServer,
 } from "../shared/transport.ts";
-import type { Verdict } from "../shared/types.ts";
+import type { SpokeRole, Verdict } from "../shared/types.ts";
 import { registerHubCommands } from "./commands.ts";
 import {
   makeAdbProbe,
@@ -55,10 +41,10 @@ import {
   waitForReady,
 } from "./ready.ts";
 import {
+  BUILT_SPOKE_ROLES,
   shutdownSpoke,
   SpokeRegistry,
   spawnSpoke,
-  SPOKE_ROLE,
 } from "./spokes.ts";
 import { registerHubTools } from "./tools.ts";
 import {
@@ -69,27 +55,23 @@ import {
   WIDGET_KEY,
 } from "./ui.ts";
 
-/** Custom message types for display-only renders. */
 const VERDICT_TYPE = "expari-verdict";
 
-/** Hub-specific operating rules appended to the agent system prompt. */
 const HUB_RULES = `
 
-You are the HUB of the pi-e2e-tester harness. You orchestrate ONE android spoke that drives a real Galaxy S21 test phone (the expari dev app). You CANNOT see or touch the phone yourself.
+You are the HUB of the pi-e2e-tester harness. You orchestrate an android spoke that drives a real test phone (the app under test's dev build). You CANNOT see or touch the phone yourself.
 
 For ANY android test request — opening the app, tapping, typing, reading a screen, asserting a state — you MUST use the \`messenger\` tool: \`messenger({ target: "android", intent: "<plain-language instruction>" })\`. The spoke's own LLM interprets the intent, drives the device, and returns a verdict (PASS|FAIL) plus text.
 
 NEVER answer an android question from your own memory or context. NEVER phrase a read as something else — to READ a screen, say so explicitly in the intent (e.g. "read the home screen and report what you see"). Relay the spoke's verdict + text back to the user faithfully.
 
-The stack (USB passthrough + expari convex/metro dev servers + the spoke) is brought up AUTOMATICALLY at startup — you do not need to ask the user to start anything. If a test fails because the device is unreachable or a dev server is down, you may re-run \`usb_attach\` or \`dev_up\`; use \`dev_down\` only to tear the dev servers down.`;
+The stack (USB passthrough + the app's convex/metro dev servers + the spoke) is brought up AUTOMATICALLY at startup — you do not need to ask the user to start anything. If a test fails because the device is unreachable or a dev server is down, you may re-run \`usb_attach\` or \`dev_up\`; use \`dev_down\` only to tear the dev servers down.`;
 
 export default function (pi: ExtensionAPI) {
   const log = createLogger("hub");
   const registry = new SpokeRegistry(log);
 
-  // In-flight `messenger` intents, keyed by requestId. The intentResult handler
-  // looks up the awaiting promise here and resolves/rejects it (mirrors the
-  // sibling's messengerPending correlation map).
+  // Keyed by requestId; the intentResult handler resolves/rejects the matching entry.
   const messengerPending = new Map<
     string,
     {
@@ -99,57 +81,43 @@ export default function (pi: ExtensionAPI) {
     }
   >();
 
-  // Hub cumulative cost (summed from assistant message_end usage).
   let cumulativeCost = 0;
 
   let transport: TransportServer | null = null;
-  /** The hub's RESOLVED transport port (after any EADDRINUSE fallback). */
+  /** RESOLVED port after any EADDRINUSE fallback — what the spoke registers to. */
   let resolvedHubPort = 0;
   let liveTimer: ReturnType<typeof setInterval> | null = null;
   let renderTimer: ReturnType<typeof setInterval> | null = null;
-  /** Guard so the auto-bring-up runs at most once per session. */
   let broughtUp = false;
-  /** Latched to true the first time the spoke reaches GREEN; re-armed on disconnect. */
+  /** Latched on first GREEN; re-armed on disconnect so a replug re-announces. */
   let readyAnnounced = false;
 
-  // Capture an ExtensionContext for use by timers / async transport handlers.
+  // Timers + async transport handlers have no ctx of their own; they read this.
   let lastCtx: ExtensionContext | null = null;
-
-  /* ─────────────────────────── rendering ─────────────────────────── */
 
   function rerender(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
     renderSpokeWidget(ctx, registry.all());
   }
 
-  /** Set a footer status segment (visible in line 1 of the custom footer). */
   function setStatus(text: string | undefined): void {
     if (lastCtx?.hasUI) lastCtx.ui.setStatus(STATUS_KEY, text);
   }
 
-  /** Notify helper that no-ops when there is no UI (timers / bring-up). */
   function notify(text: string, sev: "info" | "warning" | "error" = "info"): void {
     if (lastCtx?.hasUI) lastCtx.ui.notify(text, sev);
   }
 
-  /* ─────────────────── backgrounding into logsDir ─────────────────── */
-
-  /**
-   * Background a shell command DETACHED, redirecting stdout+stderr into a logfile
-   * under logsDir — this is the spec's `-bg + logfile` mechanism that gives BOTH
-   * visibility (read the file) AND auto-readiness (tail the file for the signal).
-   *
-   * MECHANISM: we open the logfile for append and hand its fd to child stdio, then
-   * `child.unref()` + `detached:true` so the child outlives this turn (nohup-like:
-   * it keeps running and writing the log even after the hub turn returns). The
-   * command runs through `bash -lic` so login rc files set PATH (just/adb/convex).
-   */
+  // The spec's `-bg + logfile` mechanism: gives BOTH visibility (read the file)
+  // AND auto-readiness (tail it for the signal). detached + unref means the child
+  // outlives this turn (nohup-like); `bash -lic` lets login rc files set PATH so
+  // just/adb/convex resolve.
   function backgroundToLog(
     command: string,
     logName: string,
     opts: { cwd?: string } = {},
   ): { logPath: string; pid?: number } {
-    const logPath = join(getLogsDir(), `${logName}.log`);
+    const logPath = join(getLogsDirForApp(), `${logName}.log`);
     // Append (not truncate): keep prior bring-up history for diagnosis.
     const fd = openSync(logPath, "a");
     log.info(`background -> ${logName}.log`, { command, cwd: opts.cwd });
@@ -170,17 +138,11 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /* ──────────────────────── bring-up steps ───────────────────────── */
-
-  /**
-   * usb_attach — background `usbipd.exe attach --wsl --busid <busid> --auto-attach`
-   * into logsDir/usbipd.log, then wait until the device is reachable (log signal
-   * readiness.usbAttached OR the adb probe backstop). usbipd.exe is a WINDOWS
-   * binary invoked from WSL; --auto-attach keeps it re-attaching across replugs.
-   */
+  // usbipd.exe is a WINDOWS binary invoked from WSL; --auto-attach keeps it
+  // re-attaching across device replugs.
   async function usbAttach(): Promise<{ ok: boolean; detail: string }> {
-    const device = getDevice();
-    const readiness = getReadiness();
+    const android = getAndroidPlatform();
+    const device = android.device;
     setStatus("usb_attach…");
     const cmd =
       `${device.usbipd} attach --wsl --busid ${device.busid} --auto-attach`;
@@ -188,8 +150,8 @@ export default function (pi: ExtensionAPI) {
     const res = await waitForReady({
       label: "usb",
       logPath,
-      readyRegex: readiness.usbAttached,
-      probe: makeAdbProbe(readiness.probeAdb, device.serial),
+      readyRegex: android.usbAttached,
+      probe: makeAdbProbe(android.probeAdb, device.serial),
       log,
     });
     setStatus(undefined);
@@ -204,30 +166,20 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  /**
-   * dev_up — background expari's PLAIN dev recipes into logsDir, then wait until
-   * each is ready (log signal OR probe backstop):
-   *   - `just convex-dev`  -> logsDir/convex.log  (readiness.convexReady)
-   *   - `just mobile-dev`  -> logsDir/metro.log   (readiness.metroReady / probeMetro)
-   * Kills any prior instance of each first so a stale server can't shadow a fresh
-   * one. expari's repo is never edited; we only run its public recipes.
-   */
+  // Runs the target's PUBLIC dev recipes only — its repo is never edited. Kills any
+  // prior instance first so a stale server can't shadow the fresh one.
   async function devUp(): Promise<{ ok: boolean; detail: string }> {
     const target = getTarget();
     const readiness = getReadiness();
     setStatus("dev_up…");
 
-    // Kill any prior convex/metro the hub previously backgrounded (precise
-    // patterns so we don't touch unrelated processes). `just <recipe>` execs the
-    // underlying convex/expo; match the recipe invocations we started. Await the
-    // kills so a stale server is gone before we spawn the fresh one.
+    // Await the kills so a stale server is gone before we spawn the fresh one.
     await killByPattern("just convex-dev");
     await killByPattern("just mobile-dev");
 
     const convex = backgroundToLog("just convex-dev", "convex", { cwd: target.dir });
     const metro = backgroundToLog("just mobile-dev", "metro", { cwd: target.dir });
 
-    // Wait for BOTH in parallel; each has its own log signal + probe backstop.
     const [convexRes, metroRes] = await Promise.all([
       waitForReady({
         label: "convex",
@@ -267,18 +219,18 @@ export default function (pi: ExtensionAPI) {
     return { ok: false, detail: fails.join("\n\n") };
   }
 
-  /**
-   * dev_down — kill the backgrounded convex/metro dev servers (and optionally the
-   * spoke). usbipd --auto-attach is LEFT RUNNING unless explicitly asked, so a
-   * replug keeps working. Precise pkill patterns avoid collateral kills.
-   */
+  // usbipd --auto-attach is LEFT RUNNING unless opts.spoke, so a replug keeps working.
   async function devDown(opts: { spoke?: boolean } = {}): Promise<{ ok: boolean; detail: string }> {
     const killed: string[] = [];
     if (await killByPattern("just convex-dev")) killed.push("convex");
     if (await killByPattern("just mobile-dev")) killed.push("metro");
-    if (opts.spoke && registry.isConnected()) {
-      await shutdownSpoke(registry.port(), "hub dev_down");
-      killed.push("spoke");
+    if (opts.spoke) {
+      for (const r of registry.roles()) {
+        if (registry.isConnected(r)) {
+          await shutdownSpoke(r, registry.port(r), "hub dev_down");
+          killed.push(`spoke:${r}`);
+        }
+      }
     }
     return {
       ok: true,
@@ -286,12 +238,9 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  /**
-   * pkill -f a precise pattern; resolves true iff a process matched (pkill exits 0
-   * on a match, 1 on no-match). The pattern is matched as one substring against
-   * the full command line, so "just convex-dev" only hits the recipe we started —
-   * it won't touch unrelated processes. Never rejects.
-   */
+  // Resolves true iff a process matched (pkill exits 0 on match, 1 on no-match).
+  // The pattern is one substring vs the full command line, so "just convex-dev"
+  // only hits the recipe we started. Never rejects.
   function killByPattern(pattern: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       try {
@@ -302,7 +251,7 @@ export default function (pi: ExtensionAPI) {
         });
         r.on("close", (code) => {
           log.info("pkill", { pattern, code });
-          resolve(code === 0); // 0 = matched + signalled; 1 = no match
+          resolve(code === 0);
         });
       } catch (err) {
         log.warn("pkill threw", { pattern, error: String(err) });
@@ -311,30 +260,26 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  /* ────────────────────── auto-orchestration ─────────────────────── */
-
-  /**
-   * The single owner of the "Ready to test" announcement. Called after every
-   * heartbeat and status update. Latches on first GREEN; re-arms on disconnect so
-   * an unplug→replug re-announces.
-   */
+  // The single owner of the "Ready to test" announcement, called after every
+  // heartbeat/status. The readyAnnounced latch (re-armed below) keeps it to once
+  // per green transition so a replug re-announces but steady state doesn't spam.
   function maybeAnnounceReady(): void {
-    if (registry.isReady() && !readyAnnounced) {
+    const roles = registry.roles();
+    const allReady = roles.length > 0 && roles.every((r) => registry.isReady(r));
+    if (allReady && !readyAnnounced) {
       readyAnnounced = true;
-      markConnected(SPOKE_ROLE);
-      notify("bring-up complete — android spoke ready (dev app foreground). Ready to test.");
+      for (const r of roles) markConnected(r);
+      notify(
+        `bring-up complete — spoke ready (${roles.join(", ")}; dev app foreground). Ready to test.`,
+      );
       if (lastCtx) rerender(lastCtx);
-    } else if (!registry.isReady() && readyAnnounced) {
-      // Re-arm so the next time the spoke reaches green it announces again.
+    } else if (!allReady && readyAnnounced) {
       readyAnnounced = false;
     }
   }
 
-  /**
-   * Poll until pred() is true within budgetMs. Returns true if pred hit, false on
-   * timeout. A cold android spoke (new WSL window + agent-device init) can take
-   * tens of seconds, so we poll rather than race a fixed timer.
-   */
+  // Poll rather than race a fixed timer: a cold spoke (new WSL window + agent-device
+  // init) can take tens of seconds.
   async function waitForSpoke(pred: () => boolean, budgetMs: number): Promise<boolean> {
     const poll = getDefaults().readyPollIntervalMs;
     const started = Date.now();
@@ -349,23 +294,18 @@ export default function (pi: ExtensionAPI) {
     return false;
   }
 
-  /**
-   * The full automatic bring-up, run once at session_start (the spec REQUIRES it
-   * fully automatic — the user never signals ready). Each step logs a milestone;
-   * a host-side failure (dev servers) STOPS the sequence; USB failure is a WARNING
-   * and we continue — the spoke self-heals once the device is plugged in.
-   */
+  // Runs once at session_start. A host-side failure (dev servers) STOPS the
+  // sequence; a USB failure only WARNS and continues — the spoke comes up
+  // needs-device and self-heals once the device is plugged in.
   async function autoBringUp(): Promise<void> {
     if (broughtUp) return;
     broughtUp = true;
     if (lastCtx) setBusyIndicator(lastCtx, true);
     try {
-      // 1) USB passthrough.
       notify("bring-up: attaching USB device…");
       const usb = await usbAttach();
       log.info("bring-up usb_attach", usb);
       if (!usb.ok) {
-        // Not a hard stop: the spoke comes up needs-device and self-heals via /reconnect.
         notify(
           `usb attach not ready: ${usb.detail} — continuing; plug in the device and run /reconnect`,
           "warning",
@@ -374,7 +314,6 @@ export default function (pi: ExtensionAPI) {
         notify(`usb attached: ${usb.detail}`);
       }
 
-      // 2) expari dev servers (convex + metro) — host-side; failure is a hard stop.
       notify("bring-up: starting expari dev servers (convex + metro)…");
       const dev = await devUp();
       log.info("bring-up dev_up", { ok: dev.ok });
@@ -384,65 +323,75 @@ export default function (pi: ExtensionAPI) {
       }
       notify(`dev servers ready: ${dev.detail}`);
 
-      // 3) Spawn the android spoke, passing the hub's RESOLVED port via HUB_PORT.
-      notify("bring-up: spawning android spoke…");
-      spawnSpoke(resolvedHubPort, log);
+      // A configured-but-unbuilt platform (ios/web) is logged + skipped, never an
+      // error — it's reserved in config until its spoke exists.
+      const configured = getConfiguredPlatforms();
+      const toSpawn = configured.filter((r) => BUILT_SPOKE_ROLES.includes(r));
+      for (const r of configured.filter((r) => !BUILT_SPOKE_ROLES.includes(r))) {
+        log.info(`platform ${r} configured but no spoke built — skipping`);
+        notify(
+          `${r} platform configured but no spoke is built yet (TBD until a Mac mini) — skipping`,
+          "warning",
+        );
+      }
+      if (toSpawn.length === 0) {
+        notify("no buildable platform spoke configured — nothing to spawn.", "warning");
+        return;
+      }
+      notify(`bring-up: spawning spoke(s): ${toSpawn.join(", ")}…`);
+      for (const r of toSpawn) spawnSpoke(r, resolvedHubPort, log);
 
-      // 4) Wait for the spoke to reach GREEN (dev app foreground) within the budget.
-      //    The ready-latch (maybeAnnounceReady) owns the "Ready to test" message.
       setStatus("waiting for spoke…");
       const budget = getDefaults().spokeConnectTimeoutMs;
-      const green = await waitForSpoke(() => registry.isReady(), budget);
+      const green = await waitForSpoke(
+        () => toSpawn.every((r) => registry.isReady(r)),
+        budget,
+      );
       setStatus(undefined);
-      log.info("bring-up spoke wait done", { green, connected: registry.isConnected() });
+      const connected = toSpawn.filter((r) => registry.isConnected(r));
+      log.info("bring-up spoke wait done", { green, connected });
 
       if (!green) {
-        if (registry.isConnected()) {
+        if (connected.length > 0) {
           notify(
-            "android spoke up but device not ready — plug in the device and run /reconnect.",
+            `spoke(s) up (${connected.join(", ")}) but device not ready — ` +
+              "plug in the device and run /reconnect.",
             "warning",
           );
         } else {
           notify(
-            `android spoke did not connect within ${Math.round(budget / 1000)}s — ` +
-              "check the spoke window / its log.",
+            `spoke(s) did not connect within ${Math.round(budget / 1000)}s — ` +
+              "check the spoke window(s) / log(s).",
             "warning",
           );
         }
       }
-      // "Ready to test" is emitted by maybeAnnounceReady() via heartbeat/status handlers.
     } finally {
       if (lastCtx?.hasUI) setBusyIndicator(lastCtx, false);
       if (lastCtx) rerender(lastCtx);
     }
   }
 
-  /* ─────────────────────── transport handlers ────────────────────── */
-
   async function startTransport(): Promise<void> {
     if (transport) return;
     const host = getHost();
     transport = await createTransportServer({
-      // Preferred hub port from config; createTransportServer auto-falls-back to
-      // the next free port. We capture the RESOLVED port to pass to the spoke.
+      // Preferred port; createTransportServer auto-falls-back to the next free one,
+      // and we capture the RESOLVED port (resolvedHubPort) to hand to the spoke.
       port: getPort("hub"),
       host,
       handlers: {
         register: (m) => {
-          // The spoke reports its OWN RESOLVED port here — capture it so every
-          // intent POSTs to the right place even after a spoke-side fallback.
-          registry.onRegister(m.port);
+          registry.onRegister(m.from, m.port);
           if (lastCtx) rerender(lastCtx);
           return { ok: true };
         },
         heartbeat: (m) => {
-          registry.onHeartbeat(m.status);
+          registry.onHeartbeat(m.from, m.status);
           maybeAnnounceReady();
           return { ok: true };
         },
         intentResult: (m) => {
-          // Correlate the spoke's final verdict back to the awaiting `messenger`
-          // tool promise. Unknown ids are tolerated.
           const pending = messengerPending.get(m.requestId);
           log.info("intent_result received", {
             from: m.from,
@@ -459,10 +408,10 @@ export default function (pi: ExtensionAPI) {
           return { ok: true };
         },
         status: (m) => {
-          registry.onStatus(m.state, m.detail ?? m.state);
+          registry.onStatus(m.from, m.state, m.detail ?? m.state);
           if (lastCtx?.hasUI) {
             const sev = m.state === "ready" ? "info" : "warning";
-            notify(`android: ${m.state}${m.detail ? ` — ${m.detail}` : ""}`, sev);
+            notify(`${m.from}: ${m.state}${m.detail ? ` — ${m.detail}` : ""}`, sev);
             rerender(lastCtx);
           }
           maybeAnnounceReady();
@@ -476,10 +425,6 @@ export default function (pi: ExtensionAPI) {
     log.info(`hub transport listening on ${host}:${resolvedHubPort}`);
   }
 
-  /* ───────────────────────── lifecycle ───────────────────────────── */
-
-  // Append the hub operating rules so the LLM always routes android work through
-  // the spoke via `messenger`.
   pi.on("before_agent_start", (event) => ({
     systemPrompt: event.systemPrompt + HUB_RULES,
   }));
@@ -488,8 +433,7 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     cumulativeCost = 0;
 
-    // STARTUP GUARD: fail loud immediately if the expari target dir is stale,
-    // before any bring-up touches just/adb (config.ts assertTargetValid).
+    // Fail loud BEFORE any bring-up touches just/adb if the target dir is stale.
     try {
       assertTargetValid();
     } catch (err) {
@@ -498,18 +442,19 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Custom 2-line footer (model/ctx/cost). Installed once; reads live values.
+    // Create the per-app logs dir before anything backgrounds into it.
+    ensureLogsDir();
+
     installHubFooter(pi, ctx, () => cumulativeCost);
     await startTransport();
 
-    // Liveness reaper: flip a stale spoke to disconnected, re-render.
     if (!liveTimer) {
       liveTimer = setInterval(() => {
         if (registry.reapStale() && lastCtx) rerender(lastCtx);
       }, getDefaults().heartbeatIntervalMs);
       liveTimer.unref?.();
     }
-    // Periodic re-render so spoke status (model/ctx/cost) stays fresh.
+    // Periodic re-render so the spoke's model/ctx/cost stay fresh in the widget.
     if (!renderTimer) {
       renderTimer = setInterval(() => {
         if (lastCtx) rerender(lastCtx);
@@ -519,9 +464,8 @@ export default function (pi: ExtensionAPI) {
 
     rerender(ctx);
 
-    // AUTO-BRING-UP: usb_attach -> dev_up -> spawn spoke -> wait for register.
-    // Fully automatic — the user never signals ready. Run detached so the prompt
-    // is usable immediately; milestones surface via notify + the footer status.
+    // Detached (not awaited) so the prompt is usable immediately; milestones
+    // surface via notify + the footer status.
     notify("pi-e2e-tester hub starting — auto-bringing-up the stack…", "info");
     void autoBringUp().catch((err) => {
       log.error("autoBringUp threw", { error: String(err) });
@@ -530,11 +474,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    // SHUTDOWN CASCADE: tell the spoke to shut down BEFORE tearing down our own
-    // transport. Bounded so a hung spoke can't block hub exit.
+    // Tell the spoke to shut down BEFORE tearing down our transport; bounded so a
+    // hung spoke can't block hub exit.
     try {
-      if (registry.isConnected()) {
-        await shutdownSpoke(registry.port(), "hub session_shutdown");
+      for (const r of registry.roles()) {
+        if (registry.isConnected(r)) {
+          await shutdownSpoke(r, registry.port(r), "hub session_shutdown");
+        }
       }
     } catch {
       /* ignore */
@@ -554,7 +500,6 @@ export default function (pi: ExtensionAPI) {
     log.info("hub shutdown");
   });
 
-  // Track hub cost + refresh status from assistant usage.
   pi.on("message_end", async (event, ctx) => {
     lastCtx = ctx;
     if (event.message.role === "assistant") {
@@ -568,8 +513,6 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     rerender(ctx);
   });
-
-  /* ──────────────────── display renderer (verdict) ────────────────── */
 
   const asText = (content: unknown): string =>
     typeof content === "string"
@@ -590,8 +533,6 @@ export default function (pi: ExtensionAPI) {
     return new Text(tag + asText(message.content), 0, 0);
   });
 
-  /* ───────────────────────── commands ─────────────────────────────── */
-
   registerHubCommands(pi, {
     log,
     registry,
@@ -605,8 +546,6 @@ export default function (pi: ExtensionAPI) {
     usbAttach,
     waitForSpoke,
   });
-
-  /* ─────────────────────────── tools ──────────────────────────────── */
 
   registerHubTools(pi, {
     log,
@@ -625,6 +564,6 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
-/* Keep helper imports referenced for clarity / future use. */
+// Referenced so the imports aren't flagged unused (kept for near-term use).
 void tailLog;
 void WIDGET_KEY;

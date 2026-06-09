@@ -1,17 +1,7 @@
 /**
- * shared/state.ts — persisted runtime state + state/logs dir helpers.
- *
- * PHASE 1 NOTE: pi-4b-tester's state.ts was almost entirely chat LOCK state
- * (per-role LockState for restoring the locked chat across restarts). The
- * messenger-only android tester has NO lock concept yet — it pins a device serial
- * from config, not a chat — so that whole surface is DROPPED. What remains and is
- * genuinely needed:
- *   - ensureStateDir() / ensureLogsDir(): dir creation that log.ts + writers rely on
- *   - a lean per-role `lastConnected` PersistedState for auto-connect bookkeeping
- *
- * Stored at ~/.pi-e2e-tester/state.json. Writes are atomic-ish: write to a temp
- * file then rename. Dirs are created on demand. Uses only node: built-ins +
- * shared/{types,config}. No pi runtime dependency.
+ * Persisted runtime state + state/logs dir helpers. Namespaced by APP then
+ * platform ROLE so testing different apps/platforms never collides. node:-only
+ * (+ shared/{types,config}); no pi dependency.
  */
 
 import {
@@ -23,37 +13,36 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { getLogsDir, getStateDir } from "./config.ts";
-import type { PersistedState, RoleState, SpokeRole } from "./types.ts";
+import { getAppName, getLogsDirForApp, getStateDir } from "./config.ts";
+import type {
+  AppState,
+  PersistedState,
+  RoleState,
+  SpokeRole,
+} from "./types.ts";
 
-/** A fresh, empty per-role state. */
 function emptyRoleState(): RoleState {
   return { lastConnected: null };
 }
 
-/** A fresh, empty persisted state. */
 export function emptyState(): PersistedState {
-  return { android: emptyRoleState() };
+  return {};
 }
 
-/** Absolute path to state.json (under the configured state dir). */
 export function getStatePath(): string {
   return join(getStateDir(), "state.json");
 }
 
-/** Ensure the state directory exists. */
 export function ensureStateDir(): void {
   const dir = getStateDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-/** Ensure the logs directory exists (logsDir is decoupled from stateDir). */
 export function ensureLogsDir(): void {
-  const dir = getLogsDir();
+  const dir = getLogsDirForApp();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-/** Coerce an unknown parsed object into a valid RoleState. */
 function coerceRoleState(v: unknown): RoleState {
   if (typeof v !== "object" || v === null) return emptyRoleState();
   const o = v as Record<string, unknown>;
@@ -62,24 +51,34 @@ function coerceRoleState(v: unknown): RoleState {
   return { lastConnected };
 }
 
-/**
- * Read the persisted state. Returns empty state if the file is missing or
- * unparseable (never throws on a fresh machine).
- */
+function coerceAppState(v: unknown): AppState {
+  const out: AppState = {};
+  if (typeof v !== "object" || v === null) return out;
+  for (const [role, rs] of Object.entries(v as Record<string, unknown>)) {
+    if (role === "android" || role === "ios" || role === "web") {
+      out[role] = coerceRoleState(rs);
+    }
+  }
+  return out;
+}
+
+/** Empty state if the file is missing/unparseable — never throws on a fresh machine. */
 export function readState(): PersistedState {
   const path = getStatePath();
   if (!existsSync(path)) return emptyState();
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    return {
-      android: coerceRoleState(raw.android),
-    };
+    const out: PersistedState = {};
+    for (const [app, appState] of Object.entries(raw)) {
+      out[app] = coerceAppState(appState);
+    }
+    return out;
   } catch {
     return emptyState();
   }
 }
 
-/** Atomically write the full persisted state. */
+/** Atomic (temp + rename) so a crash can't leave a half-written state.json. */
 export function writeState(state: PersistedState): void {
   ensureStateDir();
   const path = getStatePath();
@@ -88,26 +87,24 @@ export function writeState(state: PersistedState): void {
   renameSync(tmp, path);
 }
 
-/** Read just one role's state. */
 export function getRoleState(role: SpokeRole): RoleState {
-  return readState()[role];
+  const app = readState()[getAppName()];
+  return app?.[role] ?? emptyRoleState();
 }
 
-/**
- * Update one role's state via a partial patch, persisting the result.
- * Returns the updated full state.
- */
 export function updateRoleState(
   role: SpokeRole,
   patch: Partial<RoleState>,
 ): PersistedState {
+  const app = getAppName();
   const state = readState();
-  state[role] = { ...state[role], ...patch };
+  const appState = state[app] ?? {};
+  appState[role] = { ...(appState[role] ?? emptyRoleState()), ...patch };
+  state[app] = appState;
   writeState(state);
   return state;
 }
 
-/** Convenience: stamp a role's lastConnected = now. */
 export function markConnected(role: SpokeRole): PersistedState {
   return updateRoleState(role, { lastConnected: Date.now() });
 }

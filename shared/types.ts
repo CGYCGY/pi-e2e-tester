@@ -1,32 +1,17 @@
 /**
- * shared/types.ts — the SHARED CONTRACT for pi-e2e-tester.
- *
- * Pure TypeScript types (no runtime code, no pi-package imports) so this module
- * is cheap to import from any extension via a relative .ts import (jiti).
- *
- * Phase 1 is MESSENGER-ONLY: the chat-/DAG-specific types from the pi-4b-tester
- * sibling (send/wait/reply/incoming/mismatch, expectations, TaskPlan, lock state)
- * are intentionally ABSENT — they're not missing by mistake. The hub expresses NL
- * `intent`; the spoke's own LLM interprets it and answers with an `intent_result`.
+ * The SHARED CONTRACT. Pure types (no runtime code, no pi imports) so it's cheap
+ * to import via jiti from any extension. Messenger-only: no send/wait/DAG/lock
+ * types — the hub sends NL `intent`, the spoke answers `intent_result`.
  */
 
-/* ── 1. Roles ── */
+/** android is built; ios/web are reserved (one spoke per platform). */
+export type Platform = "android" | "ios" | "web";
 
-/**
- * Phase 1 is hub + android only; web/ios join later (build order android -> web
- * -> ios) and only need to be added here + in config.
- */
-export type Role = "hub" | "android";
+export type Role = "hub" | Platform;
 
-export type SpokeRole = "android";
+export type SpokeRole = Platform;
 
-/* ── 2. Transport message union (the wire protocol) ── */
-
-/**
- * Every message carries `from` (sender role) and `ts` (epoch ms). The shared
- * token is sent/checked at the HTTP layer (header), NOT inside this payload —
- * see shared/transport.ts.
- */
+/** Token is checked at the HTTP layer (header), NOT in this payload — see shared/transport.ts. */
 export type TransportMessage =
   | RegisterMessage
   | HeartbeatMessage
@@ -48,14 +33,13 @@ export interface TransportBase {
  * spoke -> hub: announce presence after start / reattach.
  *
  * Carries the spoke's OWN RESOLVED port (it may have fallen back from the
- * configured androidSpoke port if that was occupied — see shared/transport.ts).
+ * platform's configured spokePort if that was occupied — see shared/transport.ts).
  * This completes the port-propagation loop: hub -> spoke via the HUB_PORT spawn
  * env, spoke -> hub here.
  */
 export interface RegisterMessage extends TransportBase {
   type: "register";
   from: SpokeRole;
-  /** The RESOLVED port the spoke's own HTTP server is actually listening on. */
   port: number;
   /** Best-effort liveness aid; heartbeat is canonical. */
   pid?: number;
@@ -77,7 +61,6 @@ export interface IntentMessage extends TransportBase {
   from: "hub";
   requestId: string;
   intent: string;
-  /** Override the default intent timeout for the whole spoke turn. */
   timeoutMs?: number;
 }
 
@@ -106,7 +89,7 @@ export interface IntentResultMessage extends TransportBase {
 export type SpokeReadyState =
   | "ready" // connected AND target device reachable & on the right app
   | "needs-device" // connected but the test device is not reachable (USB detached)
-  | "wrong-target" // a foreground app other than target.androidPackage is up (guard)
+  | "wrong-target" // a foreground app other than the platform's app id is up (guard)
   | "error"; // unexpected failure during verification
 
 /** spoke -> hub: result of a readiness self-check (answer to auto-connect / resume). */
@@ -125,10 +108,9 @@ export interface ResumeMessage extends TransportBase {
 
 /**
  * hub -> spoke: FRESH TEST START. Clear the spoke's LLM context to the post-setup
- * baseline (SPOKE_RULES re-inject every turn, so newSession lands there) AND
- * cold-reset the dev app on the device. This is the explicit boundary between two
- * unrelated messenger scenarios — messenger CONTINUES by default, so the user
- * fires this only when starting a genuinely new test.
+ * baseline (spoke rules re-inject every turn) AND cold-reset the dev app on the
+ * device. The explicit boundary between two unrelated messenger scenarios —
+ * messenger CONTINUES by default, so the user fires this only on a genuinely new test.
  */
 export interface ResetMessage extends TransportBase {
   type: "reset";
@@ -140,8 +122,6 @@ export interface ShutdownMessage extends TransportBase {
   type: "shutdown";
   reason?: string;
 }
-
-/* ── 3. Spoke status (carried on heartbeats; rendered in the hub widget) ── */
 
 /**
  * Rendered in the hub's below-editor widget:
@@ -171,80 +151,129 @@ export interface SpokeStatus {
   cost?: number;
 }
 
-/* ── 4. Config shape (mirror of config.json; ~ expanded by shared/config.ts) ── */
-
-/** The expari monorepo under test (the ONLY thing that changes on relocation). */
-export interface TargetConfig {
+/**
+ * APP-LEVEL block, shared by every platform's spoke. Holds the monorepo root, the
+ * shared test-creds path, optional app-wide spoke rules, and the readiness signals
+ * for the dev servers that serve ALL platforms (Convex backend + Metro bundler).
+ */
+export interface AppLevelTarget {
   /** Repo root: must contain justfile + apps/mobile. */
   dir: string;
-  /** Mobile test env file (decoupled from `dir`). */
+  /** Shared test env file (decoupled from `dir`). */
   envTest: string;
-  /** Dev app id under test (guards pin to this). */
-  androidPackage: string;
-  /** logcat tag the crash-guard watches and stamps markers under. RN default: ReactNativeJS. */
-  crashLogTag: string;
-  /** RegExp source (case-insensitive) for a crash-error log line. A generic error-phrasing fallback is always also applied in code. */
-  crashSignature: string;
-  /** App-private files (relative to the package data dir) `cold-reset` `run-as rm`s to force a signed-out first run. Empty ⇒ cold-reset is force-stop only. */
-  resetPaths: string[];
-  /** App/auth playbook injected into the spoke prompt (creds location, reset semantics). Device-submit rule lives on the DeviceProfile, not here. */
-  spokeHints: string;
+  /**
+   * OPTIONAL markdown file (relative to projectDir) injected into EVERY platform's
+   * spoke prompt — the app-wide operational playbook (creds location, reset
+   * semantics, app UI quirks). See getRulesForSpoke().
+   */
+  rulesFile?: string;
+  /** Ready-signal regexes for the SHARED dev servers (start once, serve all platforms). */
+  readiness: AppReadinessConfig;
+}
+
+/**
+ * Ready-signal regexes the hub greps from the backgrounded SHARED dev logs, plus
+ * the Metro probe backstop. Per-platform device probes live on the platform block.
+ * The index signature permits forward-compatible note/signal keys.
+ */
+export interface AppReadinessConfig {
+  /** RegExp source: backend (Convex) "functions ready" line. */
+  convexReady: string;
+  /** RegExp source: bundler (Metro/Expo) "waiting / ready" line. */
+  metroReady: string;
+  /** URL to curl for packager-status (Metro probe backstop). */
+  probeMetro: string;
+  [extra: string]: string;
 }
 
 /** The physical Android test device + its usbipd passthrough. */
-export interface DeviceConfig {
+export interface AndroidDeviceConfig {
   /** For `usbipd.exe attach --busid`. */
   busid: string;
   /** Pinned on EVERY adb / agent-device call. */
   serial: string;
   /** Binary name or absolute path. */
   usbipd: string;
-  /** DeviceProfile id under spoke/profiles/ (vendor input quirks, e.g. auth-field submit), e.g. samsung-galaxy. */
+  /** DeviceProfile id under spoke/profiles/ (vendor input quirks, e.g. samsung-galaxy). */
+  profile: string;
+}
+
+/** An iOS test device / simulator (reserved — no spoke yet). */
+export interface IosDeviceConfig {
+  /** Simulator/device UDID. */
+  udid: string;
+  /** DeviceProfile id (reserved — no ios profiles built yet). */
   profile: string;
 }
 
 /**
- * PREFERRED ports — both auto-fall back to the next free port if occupied (see
- * shared/transport.ts); resolved values propagate at runtime (HUB_PORT spawn env
- * + register message).
+ * The android platform block. `kind` is set by the loader from the `platforms`
+ * map key (the JSON does not carry it) so consumers can discriminate the union.
  */
-export interface PortsConfig {
-  hub: number;
-  androidSpoke: number;
+export interface AndroidPlatformConfig {
+  kind: "android";
+  /** Dev app id under test (guards pin to this). REQUIRED. */
+  androidPackage: string;
+  /** logcat tag the crash-guard watches + stamps markers under. REQUIRED. */
+  crashLogTag: string;
+  /** RegExp source for a crash-error log line. A generic fallback is always also applied in code. REQUIRED. */
+  crashSignature: string;
+  /** App-private files (relative to the package data dir) `cold-reset` removes. Empty ⇒ force-stop only. */
+  resetPaths: string[];
+  device: AndroidDeviceConfig;
+  /** PREFERRED transport port for this platform's spoke (auto-falls back at runtime). */
+  spokePort: number;
+  /** OPTIONAL spoke model override; empty ⇒ pi default. */
+  model?: string;
+  /** OPTIONAL reasoning tier. */
+  thinking?: string;
+  /** OPTIONAL platform-only rules markdown (relative to projectDir), injected after the app rules. */
+  rulesFile?: string;
+  /** adb device-readiness probe; {serial} is substituted. */
+  probeAdb: string;
+  /** RegExp hint for the usbipd attach success line. */
+  usbAttached: string;
 }
 
+/** The ios platform block — RESERVED. Parsed but no spoke is spawned for it yet. */
+export interface IosPlatformConfig {
+  kind: "ios";
+  iosBundleId: string;
+  device: IosDeviceConfig;
+  spokePort: number;
+  model?: string;
+  thinking?: string;
+  rulesFile?: string;
+}
+
+/** The web platform block — RESERVED. Parsed but no spoke is spawned for it yet. */
+export interface WebPlatformConfig {
+  kind: "web";
+  url?: string;
+  spokePort: number;
+  model?: string;
+  thinking?: string;
+  rulesFile?: string;
+}
+
+export type PlatformConfig =
+  | AndroidPlatformConfig
+  | IosPlatformConfig
+  | WebPlatformConfig;
+
+/** The configured platforms for an app; the map key is the platform discriminator. */
+export interface PlatformsConfig {
+  android?: AndroidPlatformConfig;
+  ios?: IosPlatformConfig;
+  web?: WebPlatformConfig;
+}
+
+/** Hub orchestrator model knobs. */
 export interface HubConfig {
   /** "provider/id". */
   model: string;
   /** Reasoning tier, e.g. "high". */
   thinking: string;
-}
-
-export interface AndroidConfig {
-  /** "provider/id". */
-  model: string;
-  /** Reasoning tier, e.g. "medium". */
-  thinking: string;
-}
-
-/**
- * Ready-signal regexes the hub greps out of the backgrounded expari dev logs,
- * plus probe backstops. Values are best-known seeds carrying `_*_note` // VERIFY
- * comments in config.json; tune freely. The index signature permits those
- * forward-compatible note/signal keys.
- */
-export interface ReadinessConfig {
-  /** RegExp source: `just convex-dev` "functions ready" line. */
-  convexReady: string;
-  /** RegExp source: `just mobile-dev` (Metro/Expo) "waiting / ready" line. */
-  metroReady: string;
-  /** RegExp source: `usbipd.exe attach` success line (hint only). */
-  usbAttached: string;
-  /** adb command; {serial} is substituted. */
-  probeAdb: string;
-  /** URL to curl for packager-status. */
-  probeMetro: string;
-  [extra: string]: string;
 }
 
 export interface Defaults {
@@ -263,9 +292,11 @@ export interface Defaults {
 export interface Config {
   /** Self-located, see PROJECT_DIR. */
   projectDir: string;
+  /** The selected app's basename (e.g. "default") — namespaces logs + state. */
+  appName: string;
   token: string;
   stateDir: string;
-  /** Relative paths resolve against projectDir. */
+  /** Relative paths resolve against projectDir. Base dir; per-app logs go under <logsDir>/<appName>. */
   logsDir: string;
   /**
    * Project-local test workspace (the ONLY filesystem the gated LLMs touch).
@@ -280,17 +311,15 @@ export interface Config {
   host: string;
   /**
    * Per-role display glyph for the status widget, keyed by role ("android" |
-   * "web" | "ios"). Default is an emoji map (🤖/🌐/🍎); set a key to "AND"/"WEB"/
-   * "IOS" (or any ASCII) on terminals without emoji/Nerd-Font support. Resolved
-   * via getRoleIcon(); the colored ● status dot is rendered separately.
+   * "web" | "ios"). Default is an emoji map (🤖/🌐/🍎); override to ASCII on
+   * terminals without emoji support. Resolved via getRoleIcon().
    */
   icons: Record<string, string>;
-  target: TargetConfig;
-  device: DeviceConfig;
-  ports: PortsConfig;
+  /** Hub transport port (PREFERRED; auto-falls back). Spoke ports are per-platform. */
+  ports: { hub: number };
+  target: AppLevelTarget;
+  platforms: PlatformsConfig;
   hub: HubConfig;
-  android: AndroidConfig;
-  readiness: ReadinessConfig;
   defaults: Defaults;
 }
 
@@ -301,6 +330,8 @@ export interface RoleState {
   lastConnected: number | null;
 }
 
-export interface PersistedState {
-  android: RoleState;
-}
+/** One app's per-platform state. */
+export type AppState = Partial<Record<SpokeRole, RoleState>>;
+
+/** Persisted state, namespaced by app name then platform role. */
+export type PersistedState = Record<string, AppState>;

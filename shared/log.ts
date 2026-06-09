@@ -1,46 +1,31 @@
 /**
- * shared/log.ts — simple append-only file logger.
- *
- * Each role writes timestamped lines to <logsDir>/<role>.log (logsDir defaults to
- * ./logs in config.json). Use createLogger(role) once and call
- * .info/.warn/.error/.debug. An optional console echo is provided for foreground
- * debugging (off by default since pi owns the TUI).
- *
- * NOTE: logsDir is also where the hub backgrounds expari's dev recipes (convex /
- * metro) so it can tail them for the real ready signal — keeping role logs and
- * dev logs together under one configured dir.
- *
- * Uses only node: built-ins + shared/{config,state}. No pi runtime dependency.
+ * Append-only file logger. logsDir is shared with the hub's backgrounded dev
+ * recipes (convex/metro) so role logs + dev logs sit under one dir the hub can
+ * tail. Console echo defaults OFF because pi owns the TUI. node:-only; no pi dep.
  */
 
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { getLogsDir } from "./config.ts";
+import { getLogsDirForApp } from "./config.ts";
 import { ensureLogsDir } from "./state.ts";
 import type { Role } from "./types.ts";
 
-/** Log severity levels. */
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
-/** A bound logger for one role. */
 export interface Logger {
-  /** Absolute path of the log file. */
   path: string;
   debug: (message: string, data?: unknown) => void;
   info: (message: string, data?: unknown) => void;
   warn: (message: string, data?: unknown) => void;
   error: (message: string, data?: unknown) => void;
-  /** Generic entrypoint. */
   log: (level: LogLevel, message: string, data?: unknown) => void;
 }
 
-/** ISO-8601 timestamp for a log line. */
 function stamp(): string {
   return new Date().toISOString();
 }
 
-/** Serialize optional structured data compactly; never throws. */
 function fmtData(data: unknown): string {
   if (data === undefined) return "";
   try {
@@ -50,18 +35,14 @@ function fmtData(data: unknown): string {
   }
 }
 
-/** Path to a role's log file (under the configured logsDir). */
 export function getLogPath(role: Role): string {
-  return join(getLogsDir(), `${role}.log`);
+  return join(getLogsDirForApp(), `${role}.log`);
 }
 
 /**
- * Create a file logger for a role. Writes are synchronous appends (small,
- * infrequent lines), so they are safe to call from timers and handlers.
- *
- * @param role   which session this logger belongs to
- * @param opts.echo  if true, also echo to console.error (stderr) — use only
- *                   when not inside the pi TUI (e.g. a standalone script).
+ * Writes are synchronous appends (small, infrequent lines), so they're safe from
+ * timers and handlers. opts.echo also writes to stderr — use only OUTSIDE the pi
+ * TUI (e.g. a standalone script).
  */
 export function createLogger(
   role: Role,
@@ -94,10 +75,7 @@ export function createLogger(
   };
 }
 
-/**
- * Console echo helper for one-off messages without creating a Logger.
- * Writes to stderr so it does not interfere with stdout-based protocols.
- */
+/** One-off stderr echo (no Logger) — stderr so it can't corrupt stdout protocols. */
 export function echo(role: Role, level: LogLevel, message: string): void {
   // eslint-disable-next-line no-console
   console.error(`${stamp()} [${role}] ${level.toUpperCase()} ${message}`);

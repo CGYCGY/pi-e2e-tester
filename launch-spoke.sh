@@ -1,48 +1,43 @@
 #!/usr/bin/env bash
-# launch-spoke.sh <android> — start a pi-e2e-tester spoke.
+# launch-spoke.sh <android> — start a pi-e2e-tester spoke (run by `just spawn` or
+# the hub at bring-up).
 #
-# Reads config.json, exports the env the spoke extension reads, then execs an
-# interactive `pi` loading ONLY spoke/index.ts (the role is chosen at launch via
-# PI_ROLE). On exit the window is kept open (trap -> exec bash) so a crash is
-# inspectable. Normally launched in a freshly spawned WSL window by `just spawn`
-# or by the hub at bring-up.
-#
-# PORT PROPAGATION (spec): the hub passes its OWN RESOLVED port to this script via
-# the inherited HUB_PORT env at spawn time. If HUB_PORT is already set in the
-# environment we HONOUR it (the hub knows its real port); only when it is unset do
-# we fall back to ports.hub from config. The spoke's own port is a PREFERRED value
-# (ports.androidSpoke) — the spoke's transport auto-falls-back to the next free
-# port and reports the RESOLVED port back to the hub via the `register` message.
+# HUB_PORT: the hub passes its OWN resolved port via the inherited env; honour it
+# when set (it knows its real bound port after any auto-fallback), else fall back
+# to config. The spoke's own port is likewise PREFERRED — transport may
+# auto-fall-back and report the resolved port to the hub via `register`.
 
 set -euo pipefail
 
-# --- resolve role ------------------------------------------------------------
 ROLE="${1:-}"
 if [[ "$ROLE" != "android" ]]; then
-  echo "launch-spoke.sh: ERROR — role must be 'android' (web/ios are phase 2; got: '${ROLE:-<none>}')" >&2
+  echo "launch-spoke.sh: ERROR — role must be 'android' (ios/web have no spoke yet; got: '${ROLE:-<none>}')" >&2
   echo "usage: launch-spoke.sh <android>" >&2
   exit 2
 fi
 
-# --- locate project ----------------------------------------------------------
+# Re-export PI_CONFIG_APP (default "default") so the spoke extension's loader
+# (shared/config.ts) selects the SAME configs/<app>.json this script reads.
+APP="${PI_CONFIG_APP:-default}"
+export PI_CONFIG_APP="$APP"
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 PROJECT_DIR="$SCRIPT_DIR"
-CONFIG="$PROJECT_DIR/config.json"
+CONFIG="$PROJECT_DIR/configs/$APP.json"
 EXTENSION="$PROJECT_DIR/spoke/index.ts"
 
 if [[ ! -f "$CONFIG" ]]; then
-  echo "launch-spoke.sh: ERROR — config.json not found at $CONFIG" >&2
+  echo "launch-spoke.sh: ERROR — app config not found: $CONFIG (PI_CONFIG_APP=$APP)" >&2
+  echo "  Create configs/$APP.json (copy configs/example.json.example) or pass a known app." >&2
   exit 1
 fi
 if [[ ! -f "$EXTENSION" ]]; then
   echo "launch-spoke.sh: ERROR — spoke extension not found at $EXTENSION" >&2
-  echo "(the spoke/ layer is owned by a later phase-2 agent; cannot launch until it exists)" >&2
   exit 1
 fi
 
-# --- ensure tooling ----------------------------------------------------------
 if ! command -v jq >/dev/null 2>&1; then
-  echo "launch-spoke.sh: ERROR — jq is required to read config.json" >&2
+  echo "launch-spoke.sh: ERROR — jq is required to read configs/<app>.json" >&2
   exit 1
 fi
 if ! command -v pi >/dev/null 2>&1; then
@@ -50,7 +45,6 @@ if ! command -v pi >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- read config -------------------------------------------------------------
 # expandTilde mirror: config.ts expands a leading ~ against $HOME.
 expand_tilde() {
   local p="$1"
@@ -70,36 +64,33 @@ HOST="$(jq -r '.host // "127.0.0.1"' "$CONFIG")"
 STATE_DIR_RAW="$(jq -r '.stateDir' "$CONFIG")"
 LOGS_DIR_RAW="$(jq -r '.logsDir' "$CONFIG")"
 
-# HUB_PORT: honour an inherited (hub-resolved) value; else fall back to config.
 CFG_HUB_PORT="$(jq -r '.ports.hub' "$CONFIG")"
 HUB_PORT="${HUB_PORT:-$CFG_HUB_PORT}"
 
-# The spoke's own PREFERRED port (transport may auto-fall-back at runtime).
-SELF_PORT="$(jq -r '.ports.androidSpoke' "$CONFIG")"
+SELF_PORT="$(jq -r --arg r "$ROLE" '.platforms[$r].spokePort' "$CONFIG")"
 
-MODEL="$(jq -r '.android.model // empty' "$CONFIG")"
-THINKING="$(jq -r '.android.thinking // empty' "$CONFIG")"
+MODEL="$(jq -r --arg r "$ROLE" '.platforms[$r].model // empty' "$CONFIG")"
+THINKING="$(jq -r --arg r "$ROLE" '.platforms[$r].thinking // empty' "$CONFIG")"
 
-# Target + device (the spoke pins device.serial on every adb/agent-device call).
 TARGET_DIR="$(expand_tilde "$(jq -r '.target.dir' "$CONFIG")")"
-ANDROID_PACKAGE="$(jq -r '.target.androidPackage' "$CONFIG")"
-DEVICE_SERIAL="$(jq -r '.device.serial' "$CONFIG")"
+ANDROID_PACKAGE="$(jq -r --arg r "$ROLE" '.platforms[$r].androidPackage' "$CONFIG")"
+DEVICE_SERIAL="$(jq -r --arg r "$ROLE" '.platforms[$r].device.serial' "$CONFIG")"
 
 STATE_DIR="$(expand_tilde "$STATE_DIR_RAW")"
 LOGS_DIR="$(expand_path "$LOGS_DIR_RAW")"
-LOG_FILE="$LOGS_DIR/$ROLE.log"
+# Namespaced <logsDir>/<app>/<role>.log (mirrors getLogFile) so apps/platforms don't collide.
+APP_LOGS_DIR="$LOGS_DIR/$APP"
+LOG_FILE="$APP_LOGS_DIR/$ROLE.log"
 
-mkdir -p "$STATE_DIR" "$LOGS_DIR"
+mkdir -p "$STATE_DIR" "$APP_LOGS_DIR"
 
-# --- export env for the spoke extension --------------------------------------
-# config.json stays the source of truth; these exports spare the extension from
-# re-deriving and carry the RESOLVED HUB_PORT the hub passed in.
+# These exports spare the extension re-deriving config + carry the resolved HUB_PORT.
 export PI_ROLE="$ROLE"
 export PI_TOKEN="$TOKEN"
 export PI_HOST="$HOST"
-export HUB_PORT="$HUB_PORT"               # spec-named: hub's resolved port
+export HUB_PORT="$HUB_PORT"
 export PI_HUB_PORT="$HUB_PORT"            # alias for symmetry with PI_SELF_PORT
-export PI_SELF_PORT="$SELF_PORT"          # spoke's PREFERRED port (may fall back)
+export PI_SELF_PORT="$SELF_PORT"          # PREFERRED; transport may fall back
 export PI_TARGET_DIR="$TARGET_DIR"
 export PI_ANDROID_PACKAGE="$ANDROID_PACKAGE"
 export PI_DEVICE_SERIAL="$DEVICE_SERIAL"
@@ -108,20 +99,20 @@ export PI_LOGS_DIR="$LOGS_DIR"
 export PI_LOG_FILE="$LOG_FILE"
 export PI_PROJECT_DIR="$PROJECT_DIR"
 
-echo "launch-spoke.sh: starting '$ROLE' spoke"
+echo "launch-spoke.sh: starting '$ROLE' spoke for app '$APP'"
 echo "  self    : $HOST:$SELF_PORT (preferred)   hub: $HOST:$HUB_PORT"
-echo "  target  : $TARGET_DIR   app: $ANDROID_PACKAGE"
+echo "  target  : $TARGET_DIR   pkg: $ANDROID_PACKAGE"
 echo "  device  : $DEVICE_SERIAL"
 echo "  log     : $LOG_FILE"
 echo "  model   : ${MODEL:-<pi default>}   thinking: ${THINKING:-<pi default>}"
 echo "  pi      : $(command -v pi)   ext: $EXTENSION"
 echo
 
-# --- keep the window open on exit for debugging ------------------------------
+# Non-zero exit keeps the window open (exec bash) so a crash stays inspectable.
 keep_open() {
   local code=$?
   if [[ $code -eq 0 ]]; then
-    exit 0   # clean shutdown (hub-requested / manual quit) — close the window
+    exit 0
   fi
   echo
   echo "launch-spoke.sh: pi ('$ROLE' spoke) exited with code $code."
@@ -131,7 +122,6 @@ keep_open() {
 }
 trap keep_open EXIT
 
-# --- launch pi ---------------------------------------------------------------
 # -nc drops ambient AGENTS.md/CLAUDE.md so the harness inherits no parent-repo
 # context; its own guidance lives in .pi/APPEND_SYSTEM.md (which -nc ignores).
 # --no-builtin-tools HARD-GATES the spoke LLM to ONLY the registered device verbs

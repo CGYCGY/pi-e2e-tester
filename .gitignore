@@ -1,6 +1,10 @@
-# Local config (secrets + machine-specific paths). Copy config.json.example -> config.json.
-config.json
-!config.json.example
+# Per-app config (secrets + machine-specific paths). Copy configs/example.json.example
+# -> configs/<app>.json. Real app files are gitignored; the .example template is tracked.
+configs/*.json
+!configs/*.example
+# Per-app rules markdown is app-specific — gitignored like the config. Copy
+# rules/<app>.md.example -> rules/<app>.md. Only the .md.example template is tracked.
+rules/*.md
 
 # Dependencies
 node_modules/

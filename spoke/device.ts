@@ -7,7 +7,7 @@
 
 import { spawn } from "node:child_process";
 
-import { getTarget } from "../shared/config.ts";
+import { getAndroidPlatform } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 
 export class DeviceError extends Error {
@@ -166,8 +166,6 @@ export class Device {
     }
   }
 
-  // ── READ PATH (snapshot-based, never eval) ──────────────────────────────────
-
   async snapshot(interactiveOnly = false): Promise<string> {
     const args = ["snapshot", "-c"];
     if (interactiveOnly) args.push("-i");
@@ -237,15 +235,12 @@ export class Device {
     await this.exec(["type", text]);
   }
 
-  // Hardware key via raw adb (agent-device has no key verb). `key` may be a bare
-  // name ("enter") or full keycode; normalized to KEYCODE_*.
+  // Hardware key via raw adb (agent-device has no key verb).
   async pressKey(key: string): Promise<void> {
     const k = key.trim().toUpperCase();
     const keycode = k.startsWith("KEYCODE_") ? k : `KEYCODE_${k}`;
     await this.execAdb(["shell", "input", "keyevent", keycode]);
   }
-
-  // ── APP LIFECYCLE (all guarded to the dev package by the caller) ────────────
 
   async launch(): Promise<void> {
     await this.exec(
@@ -259,11 +254,11 @@ export class Device {
   }
 
   // Tokens (SecureStore) + MMKV user store survive force-stop, so they're run-as
-  // rm'd first. The file list is config-driven (target.resetPaths), app-specific;
-  // empty ⇒ force-stop only. A missing path is a no-op.
+  // rm'd first. The file list is config-driven (the android platform's
+  // resetPaths), app-specific; empty ⇒ force-stop only. A missing path is a no-op.
   async coldReset(): Promise<void> {
     const pkg = this.androidPackage;
-    const targets = getTarget().resetPaths;
+    const targets = getAndroidPlatform().resetPaths;
     for (const t of targets) {
       // eslint-disable-next-line no-await-in-loop
       const res = await this.runAdb(["shell", "run-as", pkg, "rm", "-f", t]);
@@ -277,12 +272,9 @@ export class Device {
     await this.forceStop();
   }
 
-  // ── DIAGNOSTICS (crash-guard + failure reports) ─────────────────────────────
-
-  // sinceMarker, when given, diffs only lines after the last marker occurrence.
   async logcat(opts: { sinceMarker?: string; max?: number } = {}): Promise<string> {
     const max = opts.max ?? 200;
-    const tag = getTarget().crashLogTag;
+    const tag = getAndroidPlatform().crashLogTag;
     let out = "";
     try {
       // -d dumps-and-exits; `<tag>:*` `*:S` silences all tags except the crash tag.
@@ -315,7 +307,7 @@ export class Device {
   // logcat reads. Returns "" on failure (caller then tails).
   async markLog(): Promise<string> {
     const marker = `PI-E2E-MARK-${Date.now()}-${process.pid}`;
-    const tag = getTarget().crashLogTag;
+    const tag = getAndroidPlatform().crashLogTag;
     try {
       await this.execAdb(["shell", "log", "-t", tag, marker], 10000);
     } catch (err) {

@@ -1,11 +1,6 @@
-/**
- * hub/tools.ts — the hub's registered tools.
- *
- * Extracted verbatim from hub/index.ts: messenger, usb_attach, dev_up, dev_down.
- * The orchestration core (transport handlers, bring-up steps, correlation map)
- * stays in index.ts and is passed in via the `deps` handle so behavior is
- * identical.
- */
+// hub/tools.ts — the hub's registered tools. The orchestration core they call
+// (transport handlers, bring-up steps, correlation map) lives in index.ts and is
+// passed in via `deps`.
 
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,36 +13,27 @@ import type { Logger } from "../shared/log.ts";
 import { postToSpoke } from "../shared/transport.ts";
 import type { Verdict } from "../shared/types.ts";
 import { ensureTestsDirs, safeWorkspacePath } from "../shared/workspace.ts";
-import { type SpokeRegistry, SPOKE_ROLE } from "./spokes.ts";
+import { type SpokeRegistry } from "./spokes.ts";
 
-/** A pending `messenger` intent awaiting its correlated intent_result. */
 interface MessengerPending {
   resolve: (r: { verdict: Verdict; text: string }) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** Handles the tools need from the index.ts orchestration core. */
 export interface HubToolsDeps {
   log: Logger;
   registry: SpokeRegistry;
-  /** The in-flight intent correlation map (mutated in place, not reassigned). */
+  /** Mutated in place, not reassigned. */
   messengerPending: Map<string, MessengerPending>;
-  /** The custom message type the verdict is rendered as (const in index.ts). */
   verdictType: string;
-  /** Setter over index.ts's mutable `lastCtx` (tools assign `lastCtx = ctx`). */
   setLastCtx: (ctx: ExtensionContext) => void;
-  /** Read index.ts's live lastCtx for the post-execute rerender guard. */
   getLastCtx: () => ExtensionContext | null;
-  /** Re-render the spoke widget for the given ctx. */
   rerender: (ctx: ExtensionContext) => void;
-  /** Bring-up step: attach USB + wait for device readiness. */
   usbAttach: () => Promise<{ ok: boolean; detail: string }>;
-  /** Bring-up step: start convex + metro dev servers + wait ready. */
   devUp: () => Promise<{ ok: boolean; detail: string }>;
-  /** Bring-up step: stop convex + metro (+ optionally the spoke). */
   devDown: (opts?: { spoke?: boolean }) => Promise<{ ok: boolean; detail: string }>;
-  /** Resolved test-workspace dirs — the hub's ONLY filesystem access (gated LLM). */
+  /** The hub's ONLY filesystem access (the LLM is gated off built-in read/write). */
   testsDirs: { cases: string; results: string; screenshots: string };
 }
 
@@ -66,15 +52,10 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     testsDirs,
   } = deps;
 
-  // tests_* are the hub's ONLY filesystem access (built-in read/write/edit are
-  // gated off). Map a kind to its dir; every name is path-guarded to a *.md in it.
   const testsDirFor = (kind: "case" | "result") =>
     kind === "case" ? testsDirs.cases : testsDirs.results;
 
-  // messenger: THE single door to the android spoke. The hub sends a
-  // natural-language INTENT; the spoke's own LLM interprets it (driving the
-  // device via its tools) and returns a PASS/FAIL verdict + text. The hub never
-  // touches the phone directly.
+  // THE single door to the spoke — the hub never touches the phone directly.
   pi.registerTool({
     name: "messenger",
     label: "Messenger",
@@ -100,15 +81,16 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       setLastCtx(ctx);
-      if (!registry.isConnected()) {
+      const target = params.target;
+      if (!registry.isConnected(target)) {
         throw new Error(
-          "android spoke is not connected (bring-up may still be in progress). " +
+          `${target} spoke is not connected (bring-up may still be in progress). ` +
             "Check /status; re-run usb_attach / dev_up if a dependency is down.",
         );
       }
       const requestId = randomUUID();
       const timeoutMs = getDefaults().intentTimeoutMs;
-      const spokePort = registry.port();
+      const spokePort = registry.port(target);
 
       const result = await new Promise<{ verdict: Verdict; text: string }>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -117,7 +99,6 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
         }, timeoutMs);
         timer.unref?.();
 
-        // Abort path: drop the pending entry if the tool call is cancelled.
         const onAbort = () => {
           clearTimeout(timer);
           messengerPending.delete(requestId);
@@ -131,9 +112,8 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
 
         messengerPending.set(requestId, { resolve, reject, timer });
 
-        // POST the intent to the spoke's RESOLVED port; fail fast if the POST itself fails.
         void postToSpoke(
-          SPOKE_ROLE,
+          target,
           {
             type: "intent",
             from: "hub",
@@ -159,12 +139,11 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
         );
       });
 
-      // Surface the verdict as a display-only custom message + return it.
       if (ctx.hasUI) {
         pi.sendMessage(
           {
             customType: VERDICT_TYPE,
-            content: `[android] ${result.verdict}: ${result.text}`,
+            content: `[${target}] ${result.verdict}: ${result.text}`,
             display: true,
             details: { pass: result.verdict === "PASS" },
           },
@@ -173,12 +152,11 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
       }
       return {
         content: [{ type: "text", text: `${result.verdict}: ${result.text}` }],
-        details: { target: SPOKE_ROLE, requestId, verdict: result.verdict, text: result.text },
+        details: { target, requestId, verdict: result.verdict, text: result.text },
       };
     },
   });
 
-  // usb_attach: background usbipd attach + wait for device readiness.
   pi.registerTool({
     name: "usb_attach",
     label: "USB attach",
@@ -203,7 +181,6 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     },
   });
 
-  // dev_up: background expari's convex + metro dev recipes + wait ready.
   pi.registerTool({
     name: "dev_up",
     label: "Dev up",
@@ -228,7 +205,6 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     },
   });
 
-  // dev_down: stop the backgrounded convex/metro (+ optionally the spoke).
   pi.registerTool({
     name: "dev_down",
     label: "Dev down",
@@ -256,10 +232,8 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
     },
   });
 
-  // tests_list / tests_read / tests_write: the hub's scoped Markdown workspace.
-  // cases/ = test scenarios the hub READS then drives via messenger; results/ =
-  // where it RECORDS PASS/FAIL outcomes. These three tools are the hub's ONLY
-  // filesystem access — built-in bash/read/write/edit are gated off at launch.
+  // tests_* are the hub's ONLY filesystem access — built-in bash/read/write/edit
+  // are gated off at launch.
   const KIND_PARAM = Type.Union([Type.Literal("case"), Type.Literal("result")], {
     description: "Which set: 'case' (test scenarios in tests/cases) or 'result' (outcome records in tests/results).",
   });

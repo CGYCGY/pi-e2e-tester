@@ -1,0 +1,107 @@
+{
+  "_README": "TEMPLATE for ONE app under pi-e2e-tester. Copy to configs/<app>.json (gitignored) and fill the CHANGE-ME / <...> placeholders. `just hub` loads configs/default.json; `just hub <app>` loads configs/<app>.json. Each file is SELF-CONTAINED (top-level infra + an app-level `target` + a `platforms` map). Keys beginning with `_` are inline docs and are IGNORED by the loader (shared/config.ts). Identity is REQUIRED — there are NO app defaults, so a missing androidPackage/serial/etc fails loud rather than silently testing the wrong app.",
+
+  "token": "CHANGE-ME-to-a-random-shared-secret",
+  "_token_note": "Shared secret checked on every localhost transport request (x-pi4b-token header). Any random string; keep the hub + every spoke of THIS app on the same value. Repeated per app file — that's fine.",
+
+  "stateDir": "~/.pi-e2e-tester",
+  "_stateDir_note": "Where persisted runtime state (state.json) is written; namespaced by app + platform inside. `~` expands to $HOME.",
+
+  "logsDir": "./logs",
+  "_logsDir_note": "Base logs dir. Per-app/platform logs go under <logsDir>/<app>/<platform>.log (and the hub backgrounds the app's dev-server logs alongside). The hub TAILS these for auto-readiness. Relative resolves against the project dir; leading ~ expands to $HOME.",
+
+  "testsDir": "./tests",
+  "_testsDir_note": "Test workspace: cases/ (*.md), results/ (*.md), screenshots/ (*.png). The gated LLMs reach the filesystem ONLY here. Relative resolves against the project dir.",
+
+  "ports": { "hub": 7200 },
+  "_ports_note": "Hub's PREFERRED transport port (auto-falls back to the next free port; resolved value propagates to spokes via the HUB_PORT spawn env). Spoke ports are PER-PLATFORM — see platforms.<p>.spokePort.",
+
+  "icons": {
+    "android": "🤖",
+    "web": "🌐",
+    "ios": "🍎"
+  },
+  "_icons_note": "Per-platform glyph in the status widget. Emoji by default; set to ASCII (e.g. \"android\": \"AND\") on terminals without emoji support.",
+
+  "hub": {
+    "model": "openai-codex/gpt-5.5",
+    "thinking": "high"
+  },
+  "_hub_note": "Hub orchestrates + judges verdicts, so a high reasoning tier fits. Any model id your pi install is configured for.",
+
+  "defaults": {
+    "heartbeatIntervalMs": 5000,
+    "heartbeatTimeoutMs": 15000,
+    "intentTimeoutMs": 180000,
+    "spokeConnectTimeoutMs": 120000,
+    "readyTimeoutMs": 180000,
+    "readyPollIntervalMs": 2000
+  },
+  "_defaults_note": "Tunable timing (ms): heartbeat cadence/timeout, whole-intent-turn budget, cold-spoke connect budget, dev-up ready wait, ready re-poll cadence.",
+
+  "target": {
+    "_about": "APP-LEVEL block — shared by EVERY platform's spoke. The app repo under test (driven ONLY via its own `just` recipes + adb/agent-device; your repo stays UNTOUCHED), the shared test creds, the app-wide rules file, and the SHARED dev-server readiness signals (Metro/Convex serve all platforms, start once).",
+    "dir": "/absolute/path/to/your/app-repo",
+    "_dir_note": "Absolute path to the app monorepo root. On WSL keep it on a Linux-native mount (NOT /mnt/c — breaks Metro watch + Gradle). The startup guard expects a justfile + apps/mobile here (adjust assertTargetValid in shared/config.ts if your layout differs).",
+    "envTest": "/absolute/path/to/your/app/.env.test",
+    "_envTest_note": "ABSOLUTE path (decoupled from dir) to the test env file with your test creds. The spoke reads it when it needs to sign in. \"\" if no creds file is needed.",
+    "rulesFile": "./rules/default.md.example",
+    "_rulesFile_note": "OPTIONAL markdown file (relative to the project dir) injected into EVERY platform's spoke prompt — the app-wide operational playbook the spoke can't derive: creds location, reset semantics, and app UI quirks (e.g. 'focusing a field spawns a docked field — re-observe and type into the new one'). Put DEVICE-input rules (how to submit a field) on the DeviceProfile, NOT here. SETUP: copy rules/default.md.example -> rules/<app>.md (gitignored, like this config), edit it, and point this at './rules/<app>.md'. This template points at the tracked .md.example so a fresh clone is self-consistent. Omit the key for no app rules.",
+    "readiness": {
+      "_about": "Ready-signal regexes (JS RegExp source) the hub greps from the backgrounded SHARED dev-server logs for auto-readiness. Defaults suit an Expo/Metro + Convex stack — OVERRIDE for your dev servers.",
+      "convexReady": "Convex functions ready|convex.*ready",
+      "_convexReady_note": "Your BACKEND dev server's 'ready' line (default: Convex). Remove/ignore if you have none.",
+      "metroReady": "Waiting on http://localhost:8081|Metro waiting|Logs for your project will appear below",
+      "_metroReady_note": "Your BUNDLER's 'ready' line (default: Expo/Metro on :8081).",
+      "probeMetro": "http://127.0.0.1:8081/status",
+      "_probeMetro_note": "PROBE BACKSTOP: the hub curls this; Metro answers 'packager-status:running'. Point at your dev server health URL, or drop it."
+    }
+  },
+
+  "platforms": {
+    "_about": "One entry per platform this app runs on. The hub spawns ONE spoke per entry it has a built spoke for. Today only `android` has a spoke; `ios`/`web` blocks are parsed but produce a logged-skip (no spoke spawned).",
+    "android": {
+      "androidPackage": "com.yourcompany.yourapp.dev",
+      "_androidPackage_note": "REQUIRED. Dev build package id, already installed (+ ideally logged in) on the test device. The wrong-target guard asserts foreground == this; `app cold-reset` is guarded to this id only. Find via `adb shell pm list packages | grep <yourapp>`.",
+      "crashLogTag": "ReactNativeJS",
+      "_crashLogTag_note": "REQUIRED. logcat tag the crash-guard watches + stamps markers under. RN apps log under ReactNativeJS; a native/Flutter app uses another tag (e.g. `flutter`).",
+      "crashSignature": "(^|\\s)E[\\/\\s]ReactNativeJS|\\bE ReactNativeJS\\b",
+      "_crashSignature_note": "REQUIRED. JS RegExp source: a logcat line matching this (case-insensitive) FAILS the step. A generic fallback (redbox/exception/fatal) is ALWAYS also applied in code, so it can be loose.",
+      "resetPaths": [
+        "shared_prefs/SecureStore.xml",
+        "files/mmkv/mobile-template",
+        "files/mmkv/mobile-template.crc"
+      ],
+      "_resetPaths_note": "App-private files (relative to the package data dir) `app cold-reset` `run-as <pkg> rm -f`s for a true signed-out first run. APP-SPECIFIC. Empty [] ⇒ cold-reset is force-stop only.",
+      "device": {
+        "_about": "The physical Android test device (WSL: attached via usbipd USB passthrough; native Linux/macOS: adb sees it directly, busid/usbipd unused).",
+        "busid": "<usbipd-busid, e.g. 1-6>",
+        "_busid_note": "WSL/usbipd only: bus id from `usbipd.exe list` (Windows). Hub backgrounds `usbipd.exe attach --wsl --busid <busid> --auto-attach`.",
+        "serial": "CHANGE-ME-adb-serial",
+        "_serial_note": "REQUIRED. adb serial (from `adb devices`). The spoke pins it on EVERY adb/agent-device call (agent-device also lists a desktop target).",
+        "usbipd": "usbipd.exe",
+        "_usbipd_note": "usbipd binary name/path (WSL only). Default assumes PATH (installs at /mnt/c/Program Files/usbipd-win/usbipd.exe).",
+        "profile": "samsung-galaxy",
+        "_profile_note": "REQUIRED. DeviceProfile under spoke/profiles/ (vendor input quirks, e.g. HOW a focused field is submitted). Built-in: `samsung-galaxy` (Enter, never tap Continue — Samsung Pass overlays it), `pixel-stock` (either). Add a file in spoke/profiles/ for another vendor."
+      },
+      "spokePort": 7201,
+      "_spokePort_note": "REQUIRED. PREFERRED transport port for this platform's spoke (auto-falls back; resolved value reported back via register). Give each platform a DISTINCT port so two spokes can run at once.",
+      "model": "openai-codex/gpt-5.5",
+      "thinking": "medium",
+      "_model_note": "OPTIONAL spoke model/thinking. The spoke drives the device mechanically, so a medium tier usually suffices. Omit to use pi's default.",
+      "rulesFile": "./rules/default.android.md",
+      "_rulesFile_note": "OPTIONAL platform-only rules markdown (relative to project dir), injected AFTER the app rules — for android-only gotchas. Omit if none.",
+      "probeAdb": "adb -s {serial} get-state",
+      "_probeAdb_note": "Device readiness probe backstop: {serial} is substituted; expect 'device'.",
+      "usbAttached": "attached",
+      "_usbAttached_note": "RegExp hint for the usbipd attach success line (WSL only)."
+    },
+
+    "_ios_note": "RESERVED — add this block when a Mac mini + an ios spoke exist; until then NO spoke is spawned for it (the hub logs a skip). Shape sketch below.",
+    "_ios_example": {
+      "iosBundleId": "com.yourcompany.yourapp.dev",
+      "device": { "udid": "<simulator-or-device-udid>", "profile": "ios-simulator" },
+      "spokePort": 7202
+    }
+  }
+}

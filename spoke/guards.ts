@@ -5,7 +5,7 @@
 
 import type { Device } from "./device.ts";
 import type { Logger } from "../shared/log.ts";
-import { getTarget } from "../shared/config.ts";
+import { getAndroidPlatform } from "../shared/config.ts";
 
 export interface TargetGuardResult {
   ok: boolean;
@@ -73,7 +73,7 @@ export async function scanForCrash(
   // A bad config signature must degrade to the generic-only fallback, not throw.
   let sigRe: RegExp | null = null;
   try {
-    sigRe = new RegExp(getTarget().crashSignature, "i");
+    sigRe = new RegExp(getAndroidPlatform().crashSignature, "i");
   } catch (err) {
     log.warn("crash guard: invalid crashSignature, using generic fallback only", {
       err: String(err),

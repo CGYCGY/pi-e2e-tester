@@ -1,10 +1,5 @@
-/**
- * hub/commands.ts — the hub's user-facing slash commands.
- *
- * Extracted verbatim from hub/index.ts: /status, /continue, /reset, /reconnect.
- * The orchestration core (timers, transport handlers, bring-up, lifecycle) stays
- * in index.ts and is passed in via the `deps` handle so behavior is identical.
- */
+// hub/commands.ts — the hub's slash commands (/status, /continue, /reset,
+// /reconnect). The orchestration core stays in index.ts and is passed via `deps`.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -13,28 +8,21 @@ import type { Logger } from "../shared/log.ts";
 import {
   resetSpoke,
   resumeSpoke,
+  SPOKE_ROLE,
   type SpokeRegistry,
   spawnSpoke,
 } from "./spokes.ts";
 import { statusSummary } from "./ui.ts";
 
-/** Handles the commands need from the index.ts orchestration core. */
 export interface HubCommandsDeps {
   log: Logger;
   registry: SpokeRegistry;
-  /** Read-only: the hub's RESOLVED transport port (read inside command handlers). */
   getResolvedHubPort: () => number;
-  /** Setter over index.ts's mutable `lastCtx` (handlers assign `lastCtx = ctx`). */
   setLastCtx: (ctx: ExtensionContext) => void;
-  /** Re-render the spoke widget for the given ctx. */
   rerender: (ctx: ExtensionContext) => void;
-  /** Footer status segment setter (reads index.ts's live lastCtx). */
   setStatus: (text: string | undefined) => void;
-  /** UI notify helper (reads index.ts's live lastCtx; no-ops without UI). */
   notify: (text: string, sev?: "info" | "warning" | "error") => void;
-  /** Re-attach USB + wait for device readiness (bring-up step in index.ts). */
   usbAttach: () => Promise<{ ok: boolean; detail: string }>;
-  /** Poll until pred() within budgetMs (bring-up helper in index.ts). */
   waitForSpoke: (pred: () => boolean, budgetMs: number) => Promise<boolean>;
 }
 
@@ -74,7 +62,7 @@ export function registerHubCommands(pi: ExtensionAPI, deps: HubCommandsDeps): vo
         ctx.ui.notify("android spoke is not connected.", "warning");
         return;
       }
-      const res = await resumeSpoke(registry.port());
+      const res = await resumeSpoke(SPOKE_ROLE, registry.port(SPOKE_ROLE));
       ctx.ui.notify(`continue android: ${res.detail}`, res.ok ? "info" : "warning");
     },
   });
@@ -87,7 +75,7 @@ export function registerHubCommands(pi: ExtensionAPI, deps: HubCommandsDeps): vo
         ctx.ui.notify("android spoke is not connected.", "warning");
         return;
       }
-      const res = await resetSpoke(registry.port());
+      const res = await resetSpoke(SPOKE_ROLE, registry.port(SPOKE_ROLE));
       ctx.ui.notify(
         res.ok ? `↺ reset android: ${res.detail}` : `reset failed: ${res.detail}`,
         res.ok ? "info" : "warning",
@@ -104,19 +92,17 @@ export function registerHubCommands(pi: ExtensionAPI, deps: HubCommandsDeps): vo
       notify(usb.detail, usb.ok ? "info" : "warning");
 
       if (!registry.isConnected()) {
-        // Spoke process is gone — spawn fresh and wait for it to connect.
         notify("android spoke not connected — spawning…");
-        spawnSpoke(getResolvedHubPort(), log);
+        spawnSpoke(SPOKE_ROLE, getResolvedHubPort(), log);
         setStatus("waiting for spoke…");
-        await waitForSpoke(() => registry.isConnected(), getDefaults().spokeConnectTimeoutMs);
+        await waitForSpoke(() => registry.isConnected(SPOKE_ROLE), getDefaults().spokeConnectTimeoutMs);
         setStatus(undefined);
       } else {
-        // Spoke is alive — ask it to re-verify readiness (it will auto-launch the app).
-        const res = await resumeSpoke(registry.port());
+        // resume makes the live spoke re-verify readiness and auto-launch the app.
+        const res = await resumeSpoke(SPOKE_ROLE, registry.port(SPOKE_ROLE));
         notify(`resume android: ${res.detail}`, res.ok ? "info" : "warning");
       }
 
-      // maybeAnnounceReady() will fire "Ready to test" via incoming heartbeat/status.
       notify(
         registry.isReady()
           ? "android ready."

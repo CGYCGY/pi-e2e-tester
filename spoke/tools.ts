@@ -1,14 +1,6 @@
-/**
- * spoke/tools.ts — the device + workspace verbs registered as pi tools for the
- * spoke's OWN LLM. The closure variables the verbs touched are threaded in via a
- * typed `deps` object (getter/setter for the mutable runtime flags, plain handles
- * for the read-only device surface).
- *
- * Built-in tools are gated off at launch (--no-builtin-tools), so the verbs that
- * used to lean on the built-in read (the screenshot file, the creds file) are now
- * served by code-guarded tools here: read_screenshot (the look PNG, inline image)
- * and read_creds (the one fixed envTest file).
- */
+// The device + workspace verbs registered as pi tools for the spoke's own LLM.
+// Built-in tools are gated off (--no-builtin-tools), so read_screenshot and
+// read_creds replace the built-in read with code-guarded, path-fixed equivalents.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,18 +18,15 @@ import type { Device } from "./device.ts";
 import { scanForCrash } from "./guards.ts";
 import type { DeviceProfile } from "./profiles/index.ts";
 
-/** Handles the device + workspace verbs need from the spoke runtime. */
 export interface SpokeToolDeps {
   device: Device;
   profile: DeviceProfile;
   roleLog: Logger;
   androidPackage: string;
   crashLogTag: string;
-  /** Where look saves PNGs and read_screenshot reads them (path-guarded). */
   screenshotsDir: string;
-  /** The ONE fixed sign-in creds file read_creds may read (config.target.envTest). */
+  /** The ONE fixed file read_creds may read (no path param — a code-fixed allowlist). */
   envTestPath: string;
-  /** The shared acting-verb wrapper (wrong-target before, crash-guard after). */
   withGuards: (
     verb: string,
     action: () => Promise<void>,
@@ -68,7 +57,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     setGuardTrip,
   } = deps;
 
-  // 1) observe — a11y snapshot + foreground app/activity (CHEAP; the default eyes).
   pi.registerTool({
     name: "observe",
     label: "Observe (a11y + appstate)",
@@ -125,8 +113,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 2) look — screenshot into tests/screenshots; return the FILE NAME (view it
-  // via read_screenshot only if vision matters; built-in read is gated off).
   pi.registerTool({
     name: "look",
     label: "Look (screenshot)",
@@ -171,8 +157,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 2b) read_screenshot — return a look PNG as an INLINE image (replaces the lost
-  // built-in image read). Path-guarded to the screenshots dir; call only when pixels matter.
   pi.registerTool({
     name: "read_screenshot",
     label: "Read screenshot (inline image)",
@@ -207,7 +191,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 3) tap — guarded acting verb (wrong-target before, crash-guard after).
   pi.registerTool({
     name: "tap",
     label: "Tap (guarded)",
@@ -243,7 +226,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 4) type — guarded acting verb with the KEYCODE_ENTER auth-submit baked in.
   pi.registerTool({
     name: "type",
     label: "Type (guarded, auth-submit)",
@@ -271,8 +253,8 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
       const submit = params.submit ?? true;
       const { crash } = await withGuards("type", async () => {
         await device.type(params.text);
-        // Submit strategy comes from the selected DeviceProfile (e.g. samsung-galaxy
-        // submits via KEYCODE_ENTER, NEVER by tapping Continue/Sign-in).
+        // Submit strategy is the DeviceProfile's (e.g. Samsung submits via Enter,
+        // never by tapping Continue — Samsung Pass overlays it).
         if (submit) await profile.submit(device);
       });
       const note = submit ? " and submitted" : "";
@@ -294,7 +276,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 5) key — guarded acting verb: send a hardware key (enter / back / etc.).
   pi.registerTool({
     name: "key",
     label: "Key (guarded)",
@@ -329,7 +310,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 6) assert — is-predicate / visible-text check; contributes to the verdict.
   pi.registerTool({
     name: "assert",
     label: "Assert (UI predicate)",
@@ -379,7 +359,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 7) app — launch / stop / cold-reset the dev app (guarded to the dev package).
   pi.registerTool({
     name: "app",
     label: "App (launch/stop/cold-reset)",
@@ -426,7 +405,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
           details: { action: "cold-reset" },
         };
       }
-      // launch: open --relaunch, then crash-scan the startup window.
       const marker = await device.markLog();
       await device.launch();
       try {
@@ -457,7 +435,6 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // 8) logcat — pull recent crash-tag error lines for the failure report.
   pi.registerTool({
     name: "logcat",
     label: `Logcat (${crashLogTag})`,
@@ -483,9 +460,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
     },
   });
 
-  // read_creds — read the ONE fixed sign-in creds file (config.target.envTest).
-  // Replaces the built-in read the spokeHints used to point at; it can read NO
-  // other path (the path is fixed in code, not a parameter).
+  // Reads ONLY the one code-fixed creds file (no path param) — built-in read is gated off.
   pi.registerTool({
     name: "read_creds",
     label: "Read sign-in creds",

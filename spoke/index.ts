@@ -1,30 +1,6 @@
-/**
- * spoke/index.ts — the ANDROID SPOKE extension.
- *
- * The android analog of the web spoke: one independent pi session that drives a
- * REAL phone (`com.expari.app.dev` on a Galaxy S21 Ultra) for the hub. It runs
- * its OWN LLM turn per intent, with 8 device verbs registered as pi tools, and
- * answers the hub with a PASS/FAIL verdict. Implements the full SPOKE DESIGN:
- *
- *  TRANSPORT  : own HTTP server (node:http via shared/transport) on the role's
- *               resolved port; POSTs to the hub. Token checked at the HTTP layer.
- *  STARTUP    : assertTargetValid → createTransportServer (port auto-fallback) →
- *               register{port,pid} to the hub → heartbeat loop. The hub's resolved
- *               port arrives via the HUB_PORT spawn env; our resolved port is
- *               reported back in register (the port-propagation loop).
- *  INTENT     : the hub sends ONE natural-language test intent; we wake our own
- *               LLM (one turn) to interpret it with the 8 verbs, capture the clean
- *               final text at agent_end, derive a verdict, and POST intent_result.
- *  GUARDS     : two deterministic guards (code, fail closed), run INSIDE the acting
- *               verbs — wrong-target (foreground == dev package) BEFORE the verb,
- *               crash-guard (new crash-tag error lines) AFTER it. If either
- *               trips during a turn, the verdict is FORCED to FAIL.
- *  HEARTBEAT  : periodic status (device-ready | model | ctx | cost) to the hub.
- *
- * KEY MENTAL MODEL (mirrors the web spoke): the Node code (HTTP server, timers) is
- * always running; the LLM only runs during an intent turn. The verbs are the
- * device surface; the guards are non-negotiable code around the acting ones.
- */
+// The android spoke: one pi session that drives a real phone for the hub. The Node
+// code (HTTP server, timers) always runs; the LLM runs only during an intent turn.
+// Two code guards (wrong-target, crash) fail closed and force the verdict to FAIL.
 
 import type {
   ExtensionAPI,
@@ -32,11 +8,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  getAndroidPlatform,
   getDefaults,
-  getDevice,
   getPort,
   getRoleFromEnv,
   getRoleIcon,
+  getRulesForSpoke,
   getTarget,
   getTestsDirs,
 } from "../shared/config.ts";
@@ -61,21 +38,14 @@ import { assertOnTarget, scanForCrash } from "./guards.ts";
 import { getProfile } from "./profiles/index.ts";
 import { registerSpokeTools } from "./tools.ts";
 
-/** This spoke's role (phase 1 has exactly one spoke: android). */
 const ROLE: SpokeRole = "android";
 
-/**
- * Compact a token count for the status widget (e.g. 12345 -> "12.3k"). Inlined
- * here because the messenger-only foundation has no shared/format.ts (the web
- * spoke's sibling helper was dropped); kept tiny and local to spoke/.
- */
 function fmtTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Resolve the spoke role from env; warn + default to android if unset/odd. */
 function resolveRole(log: Logger): SpokeRole {
   const role = getRoleFromEnv();
   if (role === "android") return role;
@@ -83,14 +53,8 @@ function resolveRole(log: Logger): SpokeRole {
   return ROLE;
 }
 
-/**
- * Parse the spoke LLM's final turn text into a verdict + summary. The spoke is
- * instructed (system prompt) to end EVERY turn with a line `VERDICT: PASS` or
- * `VERDICT: FAIL`. We scan from the bottom for the LAST such line (most recent
- * judgement wins) and treat the rest as the human-readable summary. If no line is
- * present we FAIL CLOSED to "FAIL" (a turn that didn't render a verdict is not a
- * pass). This is the verdict-derivation half of the agent_end capture.
- */
+// Scan for the LAST `VERDICT: PASS|FAIL` line the spoke prompt requires; FAIL
+// CLOSED if absent — a turn that rendered no verdict is not a pass.
 function parseVerdict(finalText: string): { verdict: Verdict; text: string } {
   const text = finalText.trim();
   const lines = text.split("\n");
@@ -110,28 +74,27 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const role = resolveRole(createLogger(ROLE));
   const roleLog = createLogger(role);
   const defaults = getDefaults();
+  // App-level (creds/repo) vs the android platform block (this spoke's identity + device).
   const target = getTarget();
-  const deviceCfg = getDevice();
-  const androidPackage = target.androidPackage;
-  const crashLogTag = target.crashLogTag;
+  const platform = getAndroidPlatform();
+  const deviceCfg = platform.device;
+  const androidPackage = platform.androidPackage;
+  const crashLogTag = platform.crashLogTag;
 
-  // Test workspace: look saves screenshots here, read_screenshot reads them back.
-  // Built-in tools are gated off, so this is the spoke's only filesystem surface.
+  // Built-in tools are gated off, so this workspace is the spoke's only filesystem surface.
   const testsDirs = getTestsDirs();
   ensureTestsDirs(testsDirs);
 
-  // The thin agent-device wrapper, pinned to the configured phone serial + dev pkg.
   const device = new Device({
     serial: deviceCfg.serial,
     androidPackage,
     log: roleLog,
   });
 
-  // The pluggable device profile (vendor input quirks as behavior, not config):
-  // selected by config.device.profile, supplies the focused-field submit strategy.
+  // DeviceProfile = vendor input quirks (e.g. how a field is submitted), by device.profile.
   const profile = getProfile(deviceCfg.profile);
 
-  // ── Mutable spoke runtime (lives in extension memory, NOT LLM context) ───────
+  // Mutable spoke runtime — extension memory, NOT LLM context.
   let halted = false; // set on needs-device until a resume arrives
   let readyState: SpokeReadyState = "ready";
   let lastReportedState: SpokeReadyState | undefined;
@@ -142,25 +105,22 @@ export default function spokeExtension(pi: ExtensionAPI) {
   let deviceReady = true; // last known adb reachability (drives the widget)
   let lastForeground: string | undefined; // last observed foreground package
 
-  // ── LLM-driven INTENT state ──────────────────────────────────────────────────
-  // The hub sends a natural-language INTENT; we wake our own LLM (one turn) to
-  // interpret it with the 8 device verbs and POST back the turn's final text +
-  // derived verdict. Serialized to ONE in-flight intent (one phone per spoke).
+  // Serialized to ONE in-flight intent (one phone per spoke).
   let activeIntent: { requestId: string } | null = null;
   let activeIntentTimer: ReturnType<typeof setTimeout> | undefined;
-  // GUARD TRIP CAPTURE: set by an acting verb when a guard fails during the turn.
-  // If set at agent_end, the verdict is FORCED to FAIL regardless of the LLM text.
+  // Set by an acting verb when a guard fails; if still set at agent_end, the
+  // verdict is FORCED to FAIL regardless of the LLM's text.
   let guardTrip: { kind: "wrong-target" | "crash"; detail: string } | null = null;
 
-  // ── Dead-man's switch state (covers an ABRUPT hub kill: no graceful broadcast) ─
+  // Dead-man's switch (covers an ABRUPT hub kill with no graceful broadcast).
   let lastHubContactTs = Date.now(); // updated on every successful hub contact
   let everConnected = false; // CRITICAL: never self-shutdown before the hub is ever reached
   let shuttingDown = false; // re-entrancy guard for gracefulShutdown
 
-  // ── Spoke system-prompt rules (appended via before_agent_start) ──────────────
-  // GENERIC skeleton only: the device-submit rule comes from profile.submitHint
-  // and the app/auth playbook from target.spokeHints, so a non-Samsung/non-expari
-  // target gets a TRUE hint, never a hardcoded-wrong one. Guards (code) are the floor.
+  // 3 layers: generic skeleton + profile.submitHint (device submit rule) +
+  // getRulesForSpoke (app/platform rules markdown). A hardcoded-wrong hint is worse
+  // than none here (it's the spoke's only knowledge), so layers 2-3 come from
+  // config/profile, never literals. The code guards are the floor.
   const SPOKE_RULES = `
 
 ## pi-e2e-tester android spoke
@@ -180,13 +140,12 @@ You receive ONE test intent per turn. Use observe (cheap) to look BEFORE acting;
 
 ${profile.submitHint}
 
-${target.spokeHints}
+${getRulesForSpoke(role)}
 
 The acting verbs (tap/type/key/app) run two deterministic guards in code: a wrong-target guard (refuses to act unless ${androidPackage} is foreground) and a crash-guard (fails the step if new ${crashLogTag} errors appear). If a guard refuses or trips, that is a real failure — report it.
 
 End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\` or \`VERDICT: FAIL\`. Your final text is sent back to the hub verbatim.`;
 
-  // ── UI helpers ──────────────────────────────────────────────────────────────
   const renderStatus = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     const theme = ctx.ui.theme;
@@ -218,7 +177,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     renderStatus(c);
   };
 
-  // ── Heartbeat (status snapshot → hub) ────────────────────────────────────────
   const buildStatus = (): SpokeStatus => {
     const usage = activeCtx?.getContextUsage();
     const win = usage?.contextWindow ?? activeCtx?.model?.contextWindow;
@@ -236,7 +194,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     };
   };
 
-  // ── Graceful shutdown (lets the WSL window close on a clean exit) ─────────────
   const gracefulShutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -280,16 +237,12 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       });
   };
 
-  // ── Status / readiness reporting ─────────────────────────────────────────────
   const reportStatus = (state: SpokeReadyState, detail?: string): void => {
     readyState = state;
-    // Derive dependent flags from state so verifyReady callers don't need to
-    // set them separately.
     deviceReady = state !== "needs-device" && state !== "error";
     halted = state === "needs-device" || state === "error";
-    // Transition-gated: only POST on state change to avoid spamming the hub
-    // while the device is absent. refreshUI always runs; heartbeat carries
-    // readyState continuously so the hub still sees current state.
+    // Only POST on change (avoid spamming the hub while the device is absent);
+    // the heartbeat carries readyState continuously regardless.
     if (state !== lastReportedState) {
       lastReportedState = state;
       void postToHub(
@@ -300,11 +253,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI();
   };
 
-  /**
-   * Self-check readiness: device reachable AND dev app foreground?
-   * opts.launch=true: when reachable but app not foreground, launch it and recheck.
-   * Pass { launch: true } on establish-paths; omit at idle to not fight the user.
-   */
+  // opts.launch: when reachable but the app isn't foreground, launch it (pass on
+  // establish-paths; omit at idle so we don't fight the user's foreground app).
   const verifyReady = async (opts?: { launch?: boolean }): Promise<void> => {
     try {
       const reachable = await device.isReachable();
@@ -312,7 +262,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
         reportStatus("needs-device", `device ${deviceCfg.serial} not reachable (USB detached?).`);
         return;
       }
-      // Device is up; read current foreground.
       try {
         const state = await device.appstate();
         lastForeground = state.package || undefined;
@@ -323,7 +272,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
 
       const onTarget = lastForeground === androidPackage;
       if (!onTarget && opts?.launch) {
-        // Auto-open the dev app, then recheck foreground once.
         try {
           await device.launch();
           const state = await device.appstate();
@@ -348,10 +296,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     }
   };
 
-  // ── The shared acting-verb wrapper: guards in CODE around every action ────────
-  // wrong-target BEFORE the action (fail closed → throw), crash-guard AFTER it
-  // (trip → record guardTrip so agent_end FORCES FAIL, and surface to the LLM).
-  // Returns the post-action observe text so verbs can echo fresh state cheaply.
+  // Guards in code around every action: wrong-target BEFORE (fail closed → throw),
+  // crash-guard AFTER (trip → record guardTrip so agent_end FORCES FAIL).
   const withGuards = async (
     verb: string,
     action: () => Promise<void>,
@@ -367,7 +313,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     // Stamp a marker so the crash-guard can diff only the new lines from THIS verb.
     const marker = await device.markLog();
     await action();
-    // POST: crash-guard (new crash-tag error lines since the marker).
     const crash = await scanForCrash(device, marker || undefined, roleLog);
     if (!crash.ok) {
       guardTrip = { kind: "crash", detail: `${crash.reason}\n${crash.lines}` };
@@ -376,11 +321,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     return { crash: null };
   };
 
-  // ── LLM-driven INTENT (hub natural-language instruction → one spoke turn) ─────
-  // Finish an in-flight intent: derive the verdict (FORCED to FAIL if a guard
-  // tripped during the turn), POST the IntentResultMessage, clear state. The
-  // requestId guard ensures only the CURRENT intent can resolve (a late timer or a
-  // stray agent_end after we've answered is ignored).
+  // The requestId guard ensures only the CURRENT intent resolves — a late timer or
+  // a stray agent_end after we've already answered is ignored.
   const finishIntent = (
     requestId: string,
     ok: boolean,
@@ -481,15 +423,13 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     activeIntent = { requestId };
     guardTrip = null; // fresh turn: clear any stale guard trip
 
-    // Arm the timeout for the whole spoke turn.
     const timeout = timeoutMs ?? defaults.intentTimeoutMs;
     activeIntentTimer = setTimeout(() => {
       roleLog.warn("intent timed out", { requestId, timeout });
       finishIntent(requestId, false, "", "intent timed out");
     }, timeout);
 
-    // Wake our own LLM with the instruction. The final assistant text of this turn
-    // is captured in the agent_end handler, parsed into a verdict, and POSTed back.
+    // The turn's final text is captured in agent_end → verdict → POSTed back.
     roleLog.info("intent received; waking spoke LLM", { requestId, intent });
     try {
       if (activeCtx?.isIdle()) {
@@ -544,24 +484,21 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     return { ok: true, detail: `${contextDetail}; ${deviceDetail}` };
   };
 
-  // ── Hub port resolution (HUB_PORT spawn env = hub's RESOLVED port) ────────────
-  // The hub passes its own resolved port via the HUB_PORT env at spawn; honour it,
-  // else fall back to the preferred config port. All hub POSTs route through here.
+  // The hub passes its RESOLVED port via HUB_PORT at spawn (may differ from config
+  // after auto-fallback); honour it, else fall back to the preferred config port.
   const hubPort = (): number => {
     const env = process.env.HUB_PORT ?? process.env.PI_HUB_PORT;
     const n = env ? parseInt(env, 10) : NaN;
     return Number.isFinite(n) && n > 0 ? n : getPort("hub");
   };
 
-  // ── Transport server + handlers (hub → spoke) ────────────────────────────────
   const startServer = async (): Promise<void> => {
     if (server) return;
     server = await createTransportServer({
       port: getPort(role),
       handlers: {
-        // LLM-driven INTENT: wake our own LLM (one turn) to interpret the hub's
-        // natural-language test intent. ACK synchronously; the final assistant text
-        // is captured at agent_end and POSTed back as an IntentResultMessage.
+        // ACK synchronously; the final answer is captured at agent_end and POSTed
+        // back as an IntentResultMessage.
         intent: (msg) => {
           void handleIntent(msg.requestId, msg.intent, msg.timeoutMs);
           return { ok: true, accepted: true };
@@ -572,8 +509,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
           void verifyReady({ launch: true });
           return { ok: true };
         },
-        // FRESH TEST START (hub /reset) — the explicit scenario boundary;
-        // messenger otherwise CONTINUES by default. See handleReset.
+        // The explicit scenario boundary — messenger otherwise CONTINUES by default.
         reset: () => handleReset(),
         // Hub-requested shutdown (cascade): ack first, then shut down on a short
         // delay so the HTTP 200 flushes before process.exit.
@@ -602,10 +538,9 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     roleLog.info("spoke transport listening", { port: server.port, role });
   };
 
-  // Heartbeat tick: when halted (device absent / red), re-attempt readiness on
-  // each beat so plugging the device back in auto-recovers without a manual command.
-  // verifyReady returns early at needs-device BEFORE launching, so launch() is
-  // never called while the phone is absent — only once it becomes reachable again.
+  // When halted, re-attempt readiness each beat so re-plugging the device
+  // auto-recovers. verifyReady returns early at needs-device BEFORE launching, so
+  // launch() never fires while the phone is absent.
   const heartbeatTick = (): void => {
     if (halted) {
       void verifyReady({ launch: true }).then(() => sendHeartbeat());
@@ -614,9 +549,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     }
   };
 
-  // ── Register / heartbeat lifecycle ───────────────────────────────────────────
-  // Announce with our RESOLVED port (server.port may differ from the preferred
-  // config port after auto-fallback) so the hub learns where to POST intents.
+  // Announce our RESOLVED port (may differ from config after auto-fallback) so the
+  // hub knows where to POST intents.
   const announce = (): void => {
     const resolvedPort = server?.port ?? getPort(role);
     void postToHub(
@@ -636,18 +570,15 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       .catch((err) => roleLog.debug("register post failed", { err: String(err) }));
   };
 
-  // ── pi lifecycle wiring ──────────────────────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     activeCtx = ctx;
     if (ctx.hasUI) {
-      ctx.ui.setWorkingIndicator(undefined); // pi default spinner
+      ctx.ui.setWorkingIndicator(undefined);
     }
     await startServer();
     announce();
-    // Auto-connect: on start, self-check device reachability + foreground.
     await verifyReady({ launch: true });
 
-    // Heartbeat loop (self-healing tick — see heartbeatTick).
     if (!heartbeatTimer) {
       heartbeatTimer = setInterval(heartbeatTick, defaults.heartbeatIntervalMs);
       heartbeatTick();
@@ -655,12 +586,10 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI(ctx);
   });
 
-  // Append the spoke rules to the system prompt every turn.
   pi.on("before_agent_start", (event) => ({
     systemPrompt: event.systemPrompt + SPOKE_RULES,
   }));
 
-  // Keep ctx fresh + accumulate cost from assistant usage.
   pi.on("turn_start", async (_event, ctx) => {
     activeCtx = ctx;
   });
@@ -677,12 +606,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI(ctx);
   });
 
-  // Capture an INTENT turn's final answer. agent_end fires once per prompt (after
-  // the whole tool loop), carrying event.messages: AgentMessage[]. We take the LAST
-  // assistant message and join its TextContent blocks (skipping thinking /
-  // tool-call blocks) — that clean final text is parsed into the verdict + sent to
-  // the hub. (This is the agent_end capture mechanism the spec flags as the #1
-  // runtime risk; it mirrors the web spoke's pattern exactly.)
+  // Capture the intent turn's final answer: the last assistant message's text
+  // blocks → verdict. This agent_end capture is the spec's #1 runtime risk.
   pi.on("agent_end", async (event, ctx) => {
     activeCtx = ctx;
     if (!activeIntent) return;
@@ -712,7 +637,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     server = undefined;
   });
 
-  // ── Commands (manual operation / debugging) ──────────────────────────────────
   registerSpokeCommands(pi, {
     role,
     getRoleIcon,
@@ -731,7 +655,6 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     getLastForeground: () => lastForeground,
   });
 
-  // ── Device + workspace verbs (registered as pi tools for the spoke's OWN LLM) ─
   registerSpokeTools(pi, {
     device,
     profile,

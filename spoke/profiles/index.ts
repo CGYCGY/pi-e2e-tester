@@ -13,7 +13,7 @@ export function getProfile(name: string): DeviceProfile {
     const known = Object.keys(PROFILES).sort().join(", ");
     throw new Error(
       `pi-e2e-tester: unknown device profile "${name}".\n` +
-        `  Fix config.json -> device.profile to one of: ${known}.`,
+        `  Fix configs/<app>.json -> platforms.<platform>.device.profile to one of: ${known}.`,
     );
   }
   return profile;
