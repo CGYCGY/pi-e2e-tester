@@ -4,26 +4,22 @@ Copy this file to `rules/<app>.md` (gitignored, like your `configs/<app>.json`)
 and replace the examples below with your app's real rules. Point your config's
 `target.rulesFile` (and optionally `platforms.<p>.rulesFile`) at it.
 
-App-wide operational knowledge injected into EVERY spoke for this app. This is
-the spoke's ONLY knowledge of these quirks, so each rule must be true and
-self-contained. Device-input rules (e.g. how a focused field is SUBMITTED) live
-on the DeviceProfile, NOT here.
+The spoke re-reads these EVERY turn, so keep them dense. Only put here what the
+spoke can't get elsewhere: don't restate a tool's own description (`read_creds`,
+`app cold-reset`, etc. already tell the spoke what they do), and leave
+device-input rules (e.g. how a focused field is SUBMITTED) on the DeviceProfile.
+Each rule must be true and stand alone.
 
-## Auth
+## <quirk title — the negative nuance a tool won't state>
+Capture what a tool's description leaves implied. Example:
 
-Where your test credentials live and how to sign in. Example:
+> A plain force-stop leaves the AuthKit session intact. Use `app cold-reset` for
+> a true signed-out first run before testing sign-in.
 
-> The test credentials are in the file at the PI env path `envTest`. Call the
-> `read_creds` tool to read them when you need to sign in — never guess or invent
-> credentials. Use the `app` verb's `cold-reset` for a true signed-out first run
-> before testing the sign-in flow.
+## <quirk title — a behavior the spoke can't derive by observing>
+Write it as a procedure, with the failure mode. Example:
 
-## Quirk: <one-line title>
-
-Describe an app behavior the spoke cannot derive just by observing, written as a
-procedure it can follow. Example:
-
-> Focusing any text field spawns a NEW field docked above the on-screen keyboard,
-> so the `@ref` from your previous `observe` is STALE. After you focus a field,
-> re-run `observe`, find the newly-docked field, and `type` into THAT ref — never
-> into the original one (typing there silently does nothing the guards can catch).
+> Focusing any text field docks a NEW input above the keyboard, so the `@ref`
+> from your last `observe` is STALE; typing into it silently does the wrong thing
+> (no crash, so no guard catches it). Enter text as: `tap` → `observe` again →
+> `type` into the newly-docked `@ref`, never the original.
