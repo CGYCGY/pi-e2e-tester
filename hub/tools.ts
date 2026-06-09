@@ -168,7 +168,7 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
             display: true,
             details: { pass: result.verdict === "PASS" },
           },
-          { deliverAs: "nextTurn" },
+          { deliverAs: "steer" },
         );
       }
       return {
