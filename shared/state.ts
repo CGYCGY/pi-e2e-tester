@@ -5,10 +5,14 @@
  */
 
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -92,17 +96,69 @@ export function getRoleState(role: SpokeRole): RoleState {
   return app?.[role] ?? emptyRoleState();
 }
 
+// Cross-process mutex for the read-modify-write below. Hub + spoke share one
+// state.json; without this, two near-simultaneous read→merge→rename cycles let
+// the later writer's stale snapshot clobber the other's write. openSync("wx") is
+// an atomic create-if-absent; a lock older than STALE_LOCK_MS is presumed
+// orphaned by a crashed writer and stolen. Best-effort: after LOCK_TIMEOUT_MS we
+// proceed unlocked rather than wedge a caller (a rare lost write beats a hang).
+const STALE_LOCK_MS = 5000;
+const LOCK_TIMEOUT_MS = 2000;
+
+function sleepSync(ms: number): void {
+  // Synchronous, non-spinning sleep — updateRoleState callers are sync.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withStateLock<T>(fn: () => T): T {
+  ensureStateDir();
+  const lockPath = `${getStatePath()}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let fd: number | undefined;
+  for (;;) {
+    try {
+      fd = openSync(lockPath, "wx");
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        continue; // lock vanished between open and stat — retry immediately
+      }
+      if (Date.now() >= deadline) break; // give up locking; proceed best-effort
+      sleepSync(25);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd);
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* already stolen as stale — fine */
+      }
+    }
+  }
+}
+
 export function updateRoleState(
   role: SpokeRole,
   patch: Partial<RoleState>,
 ): PersistedState {
-  const app = getAppName();
-  const state = readState();
-  const appState = state[app] ?? {};
-  appState[role] = { ...(appState[role] ?? emptyRoleState()), ...patch };
-  state[app] = appState;
-  writeState(state);
-  return state;
+  return withStateLock(() => {
+    const app = getAppName();
+    const state = readState();
+    const appState = state[app] ?? {};
+    appState[role] = { ...(appState[role] ?? emptyRoleState()), ...patch };
+    state[app] = appState;
+    writeState(state);
+    return state;
+  });
 }
 
 export function markConnected(role: SpokeRole): PersistedState {
