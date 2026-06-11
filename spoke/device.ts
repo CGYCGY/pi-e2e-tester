@@ -7,7 +7,7 @@
 
 import { spawn } from "node:child_process";
 
-import { getAndroidPlatform } from "../shared/config.ts";
+import { getAndroidPlatform, getMetroPort } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 
 export class DeviceError extends Error {
@@ -243,10 +243,37 @@ export class Device {
   }
 
   async launch(): Promise<void> {
+    const url = this.resolveLaunchUrl(getAndroidPlatform().launchUrl);
+    if (url) {
+      // VIEW the dev-client deep link rather than a bare relaunch (which has no
+      // bundle URL → dev launcher menu). Raw, UNQUOTED url: adb space-joins argv
+      // into the device-shell command, and this exact form is what loads the app
+      // (Android's sh leaves the `?` literal); a url with `&` would need quoting.
+      // -W: wait for the activity to come up so the caller's post-launch appstate
+      // reads MainActivity, not a mid-transition DevLauncherActivity.
+      await this.execAdb(
+        ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", url, this.androidPackage],
+        Math.max(this.timeoutMs, 60000),
+      );
+      return;
+    }
     await this.exec(
       ["open", this.androidPackage, "--relaunch"],
       Math.max(this.timeoutMs, 60000),
     );
+  }
+
+  // Empty template ⇒ "" (caller does a plain relaunch). A {metroPort} placeholder
+  // with no configured Metro port can't be honoured, so fall back to "" too.
+  private resolveLaunchUrl(template: string): string {
+    if (!template) return "";
+    if (!template.includes("{metroPort}")) return template;
+    const port = getMetroPort();
+    if (port == null) {
+      this.log.warn("launchUrl needs {metroPort} but probeMetro has no port — relaunching instead");
+      return "";
+    }
+    return template.replace(/\{metroPort\}/g, String(port));
   }
 
   // `adb reverse tcp:<port> tcp:<port>` — the USB device reaches Metro via

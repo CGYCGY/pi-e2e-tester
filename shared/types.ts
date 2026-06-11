@@ -231,6 +231,14 @@ export interface AndroidPlatformConfig {
    * alone counts as ready.
    */
   notReadyActivities: string[];
+  /**
+   * OPTIONAL deep link `launch` opens instead of a bare relaunch. An Expo dev build
+   * relaunched with no URL parks on its launcher menu, so it needs the Metro URL
+   * handed in via the app's OWN scheme (not the package id). `{metroPort}` is
+   * substituted from getMetroPort(); the adb reverse makes localhost resolve to
+   * Metro. Empty ⇒ plain `open --relaunch` (a normal non-dev-client app).
+   */
+  launchUrl: string;
   device: AndroidDeviceConfig;
   /** PREFERRED transport port for this platform's spoke (auto-falls back at runtime). */
   spokePort: number;

@@ -160,6 +160,7 @@ function parseConfig(raw: unknown, appName: string): Config {
       // Default catches the Expo dev-client launcher; harmless on non-expo apps
       // (the substring just never matches their activities).
       notReadyActivities: strArray(a.notReadyActivities, ["DevLauncherActivity"]),
+      launchUrl: str(a.launchUrl, ""),
       device,
       spokePort: reqNumIn(a, "platforms.android", "spokePort"),
       model: typeof a.model === "string" && a.model.length > 0 ? a.model : undefined,
