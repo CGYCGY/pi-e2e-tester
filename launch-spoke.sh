@@ -59,7 +59,6 @@ expand_path() {
   case "$p" in /*) printf '%s' "$p";; *) printf '%s/%s' "$PROJECT_DIR" "$p";; esac
 }
 
-TOKEN="$(jq -r '.token' "$CONFIG")"
 HOST="$(jq -r '.host // "127.0.0.1"' "$CONFIG")"
 STATE_DIR_RAW="$(jq -r '.stateDir' "$CONFIG")"
 LOGS_DIR_RAW="$(jq -r '.logsDir' "$CONFIG")"
@@ -86,7 +85,6 @@ mkdir -p "$STATE_DIR" "$APP_LOGS_DIR"
 
 # These exports spare the extension re-deriving config + carry the resolved HUB_PORT.
 export PI_ROLE="$ROLE"
-export PI_TOKEN="$TOKEN"
 export PI_HOST="$HOST"
 export HUB_PORT="$HUB_PORT"
 export PI_HUB_PORT="$HUB_PORT"            # alias for symmetry with PI_SELF_PORT

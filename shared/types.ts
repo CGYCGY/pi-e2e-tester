@@ -48,6 +48,9 @@ export interface RegisterMessage extends TransportBase {
 export interface HeartbeatMessage extends TransportBase {
   type: "heartbeat";
   from: SpokeRole;
+  // Re-asserts the spoke's RESOLVED port on every beat so a hub restart doesn't
+  // revert rec.port to the preferred config port if the spoke had fallen back.
+  port: number;
   status: SpokeStatus;
 }
 

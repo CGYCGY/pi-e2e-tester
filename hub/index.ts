@@ -22,6 +22,7 @@ import {
   getHost,
   getLogsDirForApp,
   getPort,
+  getProjectDir,
   getReadiness,
   getTarget,
   getTestsDirs,
@@ -500,7 +501,18 @@ export default function (pi: ExtensionAPI) {
       }
       if (disposed) return;
       notify(`bring-up: spawning spoke(s): ${toSpawn.join(", ")}…`);
-      for (const r of toSpawn) spawnSpoke(r, resolvedHubPort, log);
+      // pgrep is the robust catch: on a fresh hub start the old spoke's heartbeat
+      // may not have fired yet, so isConnected alone would miss it.
+      const launcherPath = join(getProjectDir(), "launch-spoke.sh");
+      for (const r of toSpawn) {
+        // eslint-disable-next-line no-await-in-loop
+        const alreadyRunning = registry.isConnected(r) || await isRunning(`${launcherPath} ${r}`);
+        if (alreadyRunning) {
+          log.info(`spoke ${r} already running — not respawning`);
+        } else {
+          spawnSpoke(r, resolvedHubPort, log);
+        }
+      }
 
       setStatus("waiting for spoke…");
       const budget = getDefaults().spokeConnectTimeoutMs;
@@ -548,7 +560,7 @@ export default function (pi: ExtensionAPI) {
           return { ok: true };
         },
         heartbeat: (m) => {
-          registry.onHeartbeat(m.from, m.status);
+          registry.onHeartbeat(m.from, m.port, m.status);
           maybeAnnounceReady();
           return { ok: true };
         },

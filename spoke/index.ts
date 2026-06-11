@@ -221,7 +221,13 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
 
   const sendHeartbeat = (): void => {
     void postToHub(
-      { type: "heartbeat", from: role, ts: Date.now(), status: buildStatus() },
+      {
+        type: "heartbeat",
+        from: role,
+        ts: Date.now(),
+        port: server?.port ?? getPort(role),
+        status: buildStatus(),
+      },
       { port: hubPort(), timeoutMs: 4000 },
     )
       .then(() => {

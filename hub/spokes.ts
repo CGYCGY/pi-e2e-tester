@@ -16,7 +16,6 @@ import {
   getHost,
   getPort,
   getProjectDir,
-  getToken,
   getWslDistro,
 } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
@@ -103,9 +102,12 @@ export class SpokeRegistry {
     this.log.info(`spoke registered: ${role}`, { port });
   }
 
-  onHeartbeat(role: SpokeRole, status: SpokeStatus): void {
+  onHeartbeat(role: SpokeRole, port: number, status: SpokeStatus): void {
     const rec = this.ensure(role);
     rec.lastHeartbeat = Date.now();
+    // Keep rec.port current: the spoke re-asserts its resolved port every beat so
+    // a hub restart never reverts to the preferred config port if the spoke fell back.
+    if (port > 0) rec.port = port;
     rec.status = { ...status, connected: true };
     rec.readyState = status.readyState ?? (status.deviceReady ? "ready" : "needs-device");
   }
@@ -163,12 +165,13 @@ export class SpokeRegistry {
 // launch-spoke.sh HONOURS the inherited HUB_PORT + PI_CONFIG_APP, so they MUST
 // ride the wsl.exe `-e env` list: the spoke then registers back to the port the
 // hub actually bound (even after an EADDRINUSE fallback) AND loads the SAME app
-// config the hub is running. `<launcher> <role>` MUST be one double-quoted token
-// so `bash -c` runs it as the command string.
+// config the hub is running. The spoke reads its token from its own config file at
+// runtime (getToken()); passing it on the env rail would leak it into /proc/cmdline.
+// `<launcher> <role>` MUST be one double-quoted token so `bash -c` runs it as the
+// command string.
 export function spawnSpoke(role: SpokeRole, hubPort: number, log: Logger): void {
   const projectDir = getProjectDir();
   const launcher = join(projectDir, "launch-spoke.sh");
-  const token = getToken();
   const app = getAppName();
 
   // PATHS are quoted at each layer so a projectDir with spaces survives: `--cd
@@ -178,11 +181,11 @@ export function spawnSpoke(role: SpokeRole, hubPort: number, log: Logger): void 
   // role/env values are fixed (enum / number / config-key), not user paths.
   const innerArgs =
     `-d ${getWslDistro()} --cd "${projectDir}" -e env ` +
-    `HUB_PORT=${hubPort} PI_TOKEN=${token} PI_CONFIG_APP=${app} ` +
+    `HUB_PORT=${hubPort} PI_CONFIG_APP=${app} ` +
     `bash -lic "'${launcher}' ${role}"`;
   const psCommand = `Start-Process wsl.exe -ArgumentList '${innerArgs.replace(/'/g, "''")}'`;
 
-  log.info(`spawning spoke ${role}`, { hubPort, app, psCommand });
+  log.info(`spawning spoke ${role}`, { hubPort, app });
   try {
     const child = spawn(
       "powershell.exe",
