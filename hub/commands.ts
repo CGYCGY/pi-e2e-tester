@@ -48,7 +48,14 @@ export function registerHubCommands(pi: ExtensionAPI, deps: HubCommandsDeps): vo
       ctx.ui.setWidget("expari-status-dump", lines, { placement: "belowEditor" });
       ctx.ui.notify(lines.join("  |  "), "info");
       setTimeout(() => {
-        ctx.ui.setWidget("expari-status-dump", undefined);
+        // ctx may be stale by now (session replacement) — using it THROWS.
+        // rerender already guards internally; wrap the widget-clear too so this
+        // detached timer can never throw uncaught.
+        try {
+          ctx.ui.setWidget("expari-status-dump", undefined);
+        } catch {
+          return;
+        }
         rerender(ctx);
       }, 6000);
     },

@@ -173,11 +173,16 @@ export function spawnSpoke(role: SpokeRole, hubPort: number, log: Logger): void 
   const token = getToken();
   const app = getAppName();
 
+  // PATHS are quoted at each layer so a projectDir with spaces survives: `--cd
+  // "<dir>"` stops wsl splitting on spaces, and the launcher is single-quoted
+  // INSIDE the bash command. Those inner single quotes are doubled below so they
+  // survive the PowerShell single-quoted string and collapse back for wsl/bash.
+  // role/env values are fixed (enum / number / config-key), not user paths.
   const innerArgs =
-    `-d ${WSL_DISTRO} --cd ${projectDir} -e env ` +
+    `-d ${WSL_DISTRO} --cd "${projectDir}" -e env ` +
     `HUB_PORT=${hubPort} PI_TOKEN=${token} PI_CONFIG_APP=${app} ` +
-    `bash -lic "${launcher} ${role}"`;
-  const psCommand = `Start-Process wsl.exe -ArgumentList '${innerArgs}'`;
+    `bash -lic "'${launcher}' ${role}"`;
+  const psCommand = `Start-Process wsl.exe -ArgumentList '${innerArgs.replace(/'/g, "''")}'`;
 
   log.info(`spawning spoke ${role}`, { hubPort, app, psCommand });
   try {
