@@ -6,12 +6,14 @@
   "license": "MIT",
   "description": "Standalone agentic end-to-end tester for mobile/web apps, built on pi (hub + android/web/ios spokes).",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test shared/"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",
     "@earendil-works/pi-tui": "^0.78.1",
     "@sinclair/typebox": "^0.34.49",
+    "@types/bun": "^1.3.14",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
   }

@@ -24,7 +24,7 @@
     /* Interop / runtime */
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node", "bun"]
   },
   "include": ["shared/**/*.ts", "hub/**/*.ts", "spoke/**/*.ts"],
   "exclude": ["node_modules"]

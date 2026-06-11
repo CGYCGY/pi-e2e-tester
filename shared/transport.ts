@@ -46,8 +46,9 @@ import type {
  * timingSafeEqual from throwing on length mismatch AND stops the token length
  * itself from leaking via early return / compare time. This is the only
  * credential gating shutdown/reset/intent, so the compare must not be an oracle.
+ * Exported for the guard regression tests (workspace/transport.test.ts).
  */
-function tokenMatches(provided: string | undefined, token: string): boolean {
+export function tokenMatches(provided: string | undefined, token: string): boolean {
   if (provided === undefined) return false;
   const a = createHash("sha256").update(provided).digest();
   const b = createHash("sha256").update(token).digest();

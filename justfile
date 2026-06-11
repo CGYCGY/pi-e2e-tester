@@ -18,6 +18,14 @@ hub_ext := project_dir / "hub" / "index.ts"
 default:
     @just --list
 
+# Static type check (no emit; pi loads .ts directly via jiti).
+typecheck:
+    @cd "{{project_dir}}" && bunx tsc --noEmit
+
+# Guard regression tests: the in-code path guard + transport token compare.
+test:
+    @cd "{{project_dir}}" && bun test shared/
+
 # Expand a leading ~ against $HOME (mirrors shared/config.ts expandTilde).
 _expand path:
     @p='{{path}}'; case "$p" in "~") echo "$HOME";; "~/"*) echo "$HOME/${p:2}";; *) echo "$p";; esac
