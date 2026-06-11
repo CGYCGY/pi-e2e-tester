@@ -249,6 +249,21 @@ export class Device {
     );
   }
 
+  // `adb reverse tcp:<port> tcp:<port>` — the USB device reaches Metro via
+  // localhost (the recipe runs with REACT_NATIVE_PACKAGER_HOSTNAME=localhost), so
+  // WITHOUT this the dev build can't load the bundle and parks on the dev launcher.
+  // adb drops reverses on device disconnect, so the spoke re-applies it on every
+  // (re)connect before launching. Best-effort: a failure is logged, not thrown —
+  // the launch still proceeds and the readiness check reports the real state.
+  async reverseTcp(port: number): Promise<boolean> {
+    const res = await this.runAdb(["reverse", `tcp:${port}`, `tcp:${port}`]);
+    if (res.code !== 0) {
+      this.log.warn("adb reverse failed", { port, stderr: res.stderr.trim() });
+      return false;
+    }
+    return true;
+  }
+
   async forceStop(): Promise<void> {
     await this.execAdb(["shell", "am", "force-stop", this.androidPackage]);
   }

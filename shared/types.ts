@@ -92,7 +92,7 @@ export interface IntentResultMessage extends TransportBase {
 export type SpokeReadyState =
   | "ready" // connected AND target device reachable & on the right app
   | "needs-device" // connected but the test device is not reachable (USB detached)
-  | "wrong-target" // a foreground app other than the platform's app id is up (guard)
+  | "wrong-target" // foreground is another app, OR our package but not loaded (dev launcher)
   | "error"; // unexpected failure during verification
 
 /** spoke -> hub: result of a readiness self-check (answer to auto-connect / resume). */
@@ -223,6 +223,14 @@ export interface AndroidPlatformConfig {
   crashSignature: string;
   /** App-private files (relative to the package data dir) `cold-reset` removes. Empty ⇒ force-stop only. */
   resetPaths: string[];
+  /**
+   * Foreground activities that mean "our package is up but the app isn't actually
+   * loaded yet" — chiefly the Expo dev-client launcher. Matched as substrings
+   * against the foreground activity; while one matches, readiness is NOT `ready`,
+   * so the hub doesn't false-green on the dev launcher. Empty ⇒ package-foreground
+   * alone counts as ready.
+   */
+  notReadyActivities: string[];
   device: AndroidDeviceConfig;
   /** PREFERRED transport port for this platform's spoke (auto-falls back at runtime). */
   spokePort: number;

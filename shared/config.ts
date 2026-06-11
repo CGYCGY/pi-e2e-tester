@@ -157,6 +157,9 @@ function parseConfig(raw: unknown, appName: string): Config {
       crashLogTag: reqIn(a, "platforms.android", "crashLogTag"),
       crashSignature: reqIn(a, "platforms.android", "crashSignature"),
       resetPaths: strArray(a.resetPaths, []),
+      // Default catches the Expo dev-client launcher; harmless on non-expo apps
+      // (the substring just never matches their activities).
+      notReadyActivities: strArray(a.notReadyActivities, ["DevLauncherActivity"]),
       device,
       spokePort: reqNumIn(a, "platforms.android", "spokePort"),
       model: typeof a.model === "string" && a.model.length > 0 ? a.model : undefined,
@@ -390,6 +393,19 @@ export function getDevice(
 
 export function getReadiness(): AppReadinessConfig {
   return loadConfig().target.readiness;
+}
+
+/**
+ * So the `adb reverse` bridge and the hub's port-kill follow config, not a
+ * hardcoded 8081. null when probeMetro carries no explicit port.
+ */
+export function getMetroPort(): number | null {
+  try {
+    const p = new URL(getReadiness().probeMetro).port;
+    return p ? Number(p) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** empty ⇒ caller uses the pi default. */

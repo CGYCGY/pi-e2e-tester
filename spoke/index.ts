@@ -10,6 +10,7 @@ import type {
 import {
   getAndroidPlatform,
   getDefaults,
+  getMetroPort,
   getPort,
   getRoleFromEnv,
   getRoleIcon,
@@ -80,6 +81,8 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const deviceCfg = platform.device;
   const androidPackage = platform.androidPackage;
   const crashLogTag = platform.crashLogTag;
+  const notReadyActivities = platform.notReadyActivities;
+  const metroPort = getMetroPort();
 
   // Built-in tools are gated off, so this workspace is the spoke's only filesystem surface.
   const testsDirs = getTestsDirs();
@@ -263,8 +266,14 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI();
   };
 
-  // opts.launch: when reachable but the app isn't foreground, launch it (pass on
-  // establish-paths; omit at idle so we don't fight the user's foreground app).
+  // Package matches but the activity is the dev launcher ⇒ the wrong-target check
+  // (package-only) passes yet the app isn't actually loaded — must NOT report ready.
+  const onNotReadyActivity = (activity: string): boolean =>
+    notReadyActivities.some((a) => activity.includes(a));
+
+  // opts.launch: when reachable but the app isn't loaded (not foreground, or parked
+  // on the dev launcher), launch it (pass on establish-paths; omit at idle so we
+  // don't fight the user's foreground app).
   const verifyReady = async (opts?: { launch?: boolean }): Promise<void> => {
     try {
       const reachable = await device.isReachable();
@@ -272,27 +281,40 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
         reportStatus("needs-device", `device ${deviceCfg.serial} not reachable (USB detached?).`);
         return;
       }
+      let activity = "";
       try {
         const state = await device.appstate();
         lastForeground = state.package || undefined;
+        activity = state.activity;
       } catch {
         lastForeground = undefined;
       }
       markConnected(role);
 
-      const onTarget = lastForeground === androidPackage;
-      if (!onTarget && opts?.launch) {
+      const loaded = (): boolean =>
+        lastForeground === androidPackage && !onNotReadyActivity(activity);
+
+      if (!loaded() && opts?.launch) {
+        // Reverse must be re-applied BEFORE launch, not after (see reverseTcp).
+        if (metroPort) await device.reverseTcp(metroPort);
         try {
           await device.launch();
           const state = await device.appstate();
           lastForeground = state.package || undefined;
+          activity = state.activity;
         } catch {
-          /* launch failed — fall through to wrong-target */
+          /* launch failed — fall through to the status below */
         }
       }
 
-      if (lastForeground === androidPackage) {
+      if (loaded()) {
         reportStatus("ready", `device ${deviceCfg.serial} reachable; app "${androidPackage}".`);
+      } else if (lastForeground === androidPackage) {
+        reportStatus(
+          "wrong-target",
+          `app "${androidPackage}" foreground but on "${activity}" — not loaded ` +
+            `(dev launcher / Metro bundle not connected).`,
+        );
       } else {
         reportStatus(
           "wrong-target",

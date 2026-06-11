@@ -21,6 +21,7 @@ import {
   getDefaults,
   getHost,
   getLogsDirForApp,
+  getMetroPort,
   getPort,
   getProjectDir,
   getReadiness,
@@ -280,16 +281,6 @@ export default function (pi: ExtensionAPI) {
       ok: true,
       detail: killed.length ? `stopped: ${killed.join(", ")}` : "nothing to stop",
     };
-  }
-
-  // metro's port, parsed from the readiness probe URL — so port-kill follows config.
-  function getMetroPort(): number | null {
-    try {
-      const p = new URL(getReadiness().probeMetro).port;
-      return p ? Number(p) : null;
-    } catch {
-      return null;
-    }
   }
 
   // Stop a `just <recipe>` the way a terminal Ctrl+C would. A plain pkill of the

@@ -76,6 +76,8 @@
         "files/mmkv/mobile-template.crc"
       ],
       "_resetPaths_note": "App-private files (relative to the package data dir) `app cold-reset` `run-as <pkg> rm -f`s for a true signed-out first run. APP-SPECIFIC. Empty [] ⇒ cold-reset is force-stop only.",
+      "notReadyActivities": ["DevLauncherActivity"],
+      "_notReadyActivities_note": "Foreground activities meaning 'package up but app not loaded' — the Expo dev-client launcher. While the foreground activity contains one of these (substring), readiness is NOT `ready` (the hub won't false-green on the launcher) and bring-up keeps relaunching. Default fits Expo dev builds; harmless on others (never matches). Empty [] ⇒ package-foreground alone is ready.",
       "device": {
         "_about": "The physical Android test device (WSL: attached via usbipd USB passthrough; native Linux/macOS: adb sees it directly, busid/usbipd unused).",
         "busid": "<usbipd-busid, e.g. 1-6>",
