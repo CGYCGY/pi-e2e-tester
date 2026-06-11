@@ -2,7 +2,7 @@
   "_README": "TEMPLATE for ONE app under pi-e2e-tester. Copy to configs/<app>.json (gitignored) and fill the CHANGE-ME / <...> placeholders. `just hub` loads configs/default.json; `just hub <app>` loads configs/<app>.json. Each file is SELF-CONTAINED (top-level infra + an app-level `target` + a `platforms` map). Keys beginning with `_` are inline docs and are IGNORED by the loader (shared/config.ts). Identity is REQUIRED — there are NO app defaults, so a missing androidPackage/serial/etc fails loud rather than silently testing the wrong app.",
 
   "token": "CHANGE-ME-to-a-random-shared-secret",
-  "_token_note": "Shared secret checked on every localhost transport request (x-pi4b-token header). Any random string; keep the hub + every spoke of THIS app on the same value. Repeated per app file — that's fine.",
+  "_token_note": "Shared secret checked on every localhost transport request (x-pi-e2e-token header). Any random string; keep the hub + every spoke of THIS app on the same value. Repeated per app file — that's fine.",
 
   "stateDir": "~/.pi-e2e-tester",
   "_stateDir_note": "Where persisted runtime state (state.json) is written; namespaced by app + platform inside. `~` expands to $HOME.",
@@ -92,8 +92,6 @@
       "model": "openai-codex/gpt-5.5",
       "thinking": "medium",
       "_model_note": "OPTIONAL spoke model/thinking. The spoke drives the device mechanically, so a medium tier usually suffices. Omit to use pi's default.",
-      "rulesFile": "./rules/default.android.md",
-      "_rulesFile_note": "OPTIONAL platform-only rules markdown (relative to project dir), injected AFTER the app rules — for android-only gotchas. Omit if none.",
       "probeAdb": "adb -s {serial} get-state",
       "_probeAdb_note": "Device readiness probe backstop: {serial} is substituted; expect 'device'.",
       "usbAttached": "attached",

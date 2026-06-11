@@ -97,7 +97,7 @@ status app="default":
     echo; echo "=== android test device ($serial) ==="; \
     adb -s "$serial" get-state 2>/dev/null && echo "  device reachable" || echo "  device NOT reachable (USB detached?)"
 
-# name is a platform (android) OR a dev log (e.g. convex-dev) backgrounded there.
+# name is a platform (android) OR a dev log (e.g. convex) backgrounded there.
 # Tail <logsDir>/<app>/<name>.log.
 logs name app="default":
     @dir=$(just _logs-dir {{app}}); f="$dir/{{name}}.log"; \
@@ -110,6 +110,10 @@ clean-state app="default":
     @state=$(just _state-dir {{app}}); f="$state/state.json"; \
     if [ -f "$f" ]; then rm -f "$f"; echo "removed $f (runtime state)."; \
     else echo "no state file at $f"; fi
+
+# Print a fresh random token to paste into configs/<app>.json's `token`.
+gen-token:
+    @openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | xxd -p | tr -d '\n'; echo
 
 # Full reset for an app: remove state.json AND wipe its namespaced logs dir.
 clean app="default": (clean-state app)

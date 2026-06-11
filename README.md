@@ -77,6 +77,9 @@ cp configs/example.json.example configs/default.json   # then fill the CHANGE-ME
 cp rules/default.md.example      rules/default.md       # then point target.rulesFile at it
 ```
 
+Run `just gen-token` to generate a unique `token` value and paste it into your `configs/<app>.json`
+— use a distinct secret per install; do not commit it.
+
 `just hub` loads `configs/default.json`; `just hub <app>` loads
 `configs/<app>.json`. Selection rides the **`PI_CONFIG_APP`** env var, which the
 hub forwards to every spoke it spawns. Real `configs/*.json` (secrets) and
@@ -131,7 +134,7 @@ just spawn android myapp  # … for app "myapp"
 just spoke android        # run the android spoke in THIS terminal (debug, no new window)
 just status               # which ports are alive + is the test device reachable (app "default")
 just status myapp         # … for app "myapp"
-just logs <name>          # tail logs/<app>/<name>.log (platform android, or a dev log e.g. convex-dev)
+just logs <name>          # tail logs/<app>/<name>.log (platform android, or a dev log e.g. convex)
 just clean-state          # remove the runtime state cache
 just clean                # remove state + wipe the app's logs dir
 ```
