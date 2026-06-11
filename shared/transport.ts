@@ -22,6 +22,7 @@
  * Uses only node: built-ins + shared/{types,config}. No pi runtime dependency.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -39,6 +40,19 @@ import type {
   StatusMessage,
   TransportMessage,
 } from "./types.ts";
+
+/**
+ * Constant-time token check. Hashing both sides to a fixed 32-byte digest keeps
+ * timingSafeEqual from throwing on length mismatch AND stops the token length
+ * itself from leaking via early return / compare time. This is the only
+ * credential gating shutdown/reset/intent, so the compare must not be an oracle.
+ */
+function tokenMatches(provided: string | undefined, token: string): boolean {
+  if (provided === undefined) return false;
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(token).digest();
+  return timingSafeEqual(a, b);
+}
 
 /** HTTP header that carries the shared token. */
 export const TOKEN_HEADER = "x-pi4b-token";
@@ -157,7 +171,7 @@ function buildServer(token: string, handlers: TransportHandlers): http.Server {
         }
         const got = req.headers[TOKEN_HEADER];
         const provided = Array.isArray(got) ? got[0] : got;
-        if (provided !== token) {
+        if (!tokenMatches(provided, token)) {
           sendJson(res, 401, { error: "bad token" });
           return;
         }
