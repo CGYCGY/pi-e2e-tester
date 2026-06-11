@@ -12,7 +12,7 @@ project_dir := justfile_directory()
 configs_dir := project_dir / "configs"
 launch_spoke := project_dir / "launch-spoke.sh"
 hub_ext := project_dir / "hub" / "index.ts"
-wsl_distro := "Debian"
+# WSL distro for spoke windows is read from configs/<app>.json (.wslDistro) at spawn time.
 
 # Default: list recipes.
 default:
@@ -69,8 +69,8 @@ spoke platform="android" app="default":
 # Open a platform spoke in its own visible WSL window.
 spawn platform="android" app="default":
     @case '{{platform}}' in android) ;; *) echo "platform must be android (ios/web have no spoke yet)"; exit 2;; esac
-    @just _cfgfile {{app}} >/dev/null
-    powershell.exe -NoProfile -Command "Start-Process wsl.exe -ArgumentList '-d {{wsl_distro}} --cd {{project_dir}} -e env PI_CONFIG_APP={{app}} bash -lic \"{{launch_spoke}} {{platform}}\"'"
+    distro=$(jq -r '.wslDistro // "Debian"' "$(just _cfgfile {{app}})"); \
+    powershell.exe -NoProfile -Command "Start-Process wsl.exe -ArgumentList '-d $distro --cd {{project_dir}} -e env PI_CONFIG_APP={{app}} bash -lic \"{{launch_spoke}} {{platform}}\"'"
     @echo "spawned '{{platform}}' spoke window for app '{{app}}' (PowerShell Start-Process wsl.exe)"
 
 # Show which hub/spoke ports are alive + device reachability, for an app.

@@ -7,6 +7,9 @@
   "stateDir": "~/.pi-e2e-tester",
   "_stateDir_note": "Where persisted runtime state (state.json) is written; namespaced by app + platform inside. `~` expands to $HOME.",
 
+  "wslDistro": "Debian",
+  "_wslDistro_note": "WSL distro the hub launches spoke windows in. Single source of truth — config.ts (getWslDistro) and the justfile both read it; keep them from drifting. Default: Debian.",
+
   "logsDir": "./logs",
   "_logsDir_note": "Base logs dir. Per-app/platform logs go under <logsDir>/<app>/<platform>.log (and the hub backgrounds the app's dev-server logs alongside). The hub TAILS these for auto-readiness. Relative resolves against the project dir; leading ~ expands to $HOME.",
 

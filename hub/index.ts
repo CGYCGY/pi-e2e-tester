@@ -37,7 +37,6 @@ import { registerHubCommands } from "./commands.ts";
 import {
   makeAdbProbe,
   makeMetroProbe,
-  tailLog,
   waitForReady,
 } from "./ready.ts";
 import {
@@ -52,7 +51,6 @@ import {
   renderSpokeWidget,
   setBusyIndicator,
   STATUS_KEY,
-  WIDGET_KEY,
 } from "./ui.ts";
 
 const VERDICT_TYPE = "expari-verdict";
@@ -730,7 +728,3 @@ export default function (pi: ExtensionAPI) {
     testsDirs: getTestsDirs(),
   });
 }
-
-// Referenced so the imports aren't flagged unused (kept for near-term use).
-void tailLog;
-void WIDGET_KEY;

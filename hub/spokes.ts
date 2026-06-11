@@ -17,6 +17,7 @@ import {
   getPort,
   getProjectDir,
   getToken,
+  getWslDistro,
 } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import { postToSpoke } from "../shared/transport.ts";
@@ -27,9 +28,6 @@ import type { SpokeReadyState, SpokeRole, SpokeStatus } from "../shared/types.ts
 export const BUILT_SPOKE_ROLES: readonly SpokeRole[] = ["android"];
 
 export const SPOKE_ROLE: SpokeRole = "android";
-
-/** Mirrors the justfile — must stay in sync. */
-const WSL_DISTRO = "Debian";
 
 export interface SpokeRecord {
   role: SpokeRole;
@@ -179,7 +177,7 @@ export function spawnSpoke(role: SpokeRole, hubPort: number, log: Logger): void 
   // survive the PowerShell single-quoted string and collapse back for wsl/bash.
   // role/env values are fixed (enum / number / config-key), not user paths.
   const innerArgs =
-    `-d ${WSL_DISTRO} --cd "${projectDir}" -e env ` +
+    `-d ${getWslDistro()} --cd "${projectDir}" -e env ` +
     `HUB_PORT=${hubPort} PI_TOKEN=${token} PI_CONFIG_APP=${app} ` +
     `bash -lic "'${launcher}' ${role}"`;
   const psCommand = `Start-Process wsl.exe -ArgumentList '${innerArgs.replace(/'/g, "''")}'`;

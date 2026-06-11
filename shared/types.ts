@@ -296,6 +296,8 @@ export interface Config {
   appName: string;
   token: string;
   stateDir: string;
+  /** WSL distro the hub launches spoke windows in (must match the justfile). */
+  wslDistro: string;
   /** Relative paths resolve against projectDir. Base dir; per-app logs go under <logsDir>/<appName>. */
   logsDir: string;
   /**

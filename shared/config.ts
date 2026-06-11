@@ -228,6 +228,7 @@ function parseConfig(raw: unknown, appName: string): Config {
     appName,
     token: requireString("token"),
     stateDir: expandTilde(str(r.stateDir, "~/.pi-e2e-tester")),
+    wslDistro: str(r.wslDistro, "Debian"),
     logsDir: expandPath(str(r.logsDir, "./logs")),
     testsDir,
     testsCasesDir: join(testsDir, "cases"),
@@ -291,6 +292,11 @@ export function getProjectDir(): string {
 // ~ expanded.
 export function getStateDir(): string {
   return loadConfig().stateDir;
+}
+
+/** WSL distro to launch spoke windows in (single source: the app config). */
+export function getWslDistro(): string {
+  return loadConfig().wslDistro;
 }
 
 // Already ~-expanded + resolved. Base dir; per-app logs go under getLogsDirForApp().
