@@ -106,7 +106,11 @@ export default function spokeExtension(pi: ExtensionAPI) {
   let lastForeground: string | undefined; // last observed foreground package
 
   // Serialized to ONE in-flight intent (one phone per spoke).
-  let activeIntent: { requestId: string } | null = null;
+  // `armed` flips true on the FIRST agent_start after dispatch — the intent's OWN
+  // run beginning. An unrelated run already executing (operator typing in the TUI)
+  // fires agent_end first; agent_end ignores it until armed so its text can't be
+  // posted back as the intent answer.
+  let activeIntent: { requestId: string; armed: boolean } | null = null;
   let activeIntentTimer: ReturnType<typeof setTimeout> | undefined;
   // Set by an acting verb when a guard fails; if still set at agent_end, the
   // verdict is FORCED to FAIL regardless of the LLM's text.
@@ -420,7 +424,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       return;
     }
 
-    activeIntent = { requestId };
+    activeIntent = { requestId, armed: false };
     guardTrip = null; // fresh turn: clear any stale guard trip
 
     const timeout = timeoutMs ?? defaults.intentTimeoutMs;
@@ -593,6 +597,14 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   pi.on("turn_start", async (_event, ctx) => {
     activeCtx = ctx;
   });
+  // Arm the pending intent when ITS agent run starts. A run already in flight when
+  // the intent queued fired agent_start earlier, so it stays unarmed and its
+  // agent_end is ignored below. agent_start fires once per run (turn_start is
+  // per tool-loop turn — too granular to correlate a run).
+  pi.on("agent_start", async (_event, ctx) => {
+    activeCtx = ctx;
+    if (activeIntent && !activeIntent.armed) activeIntent.armed = true;
+  });
   pi.on("message_end", async (event, ctx) => {
     activeCtx = ctx;
     if (event.message.role === "assistant") {
@@ -610,7 +622,9 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   // blocks → verdict. This agent_end capture is the spec's #1 runtime risk.
   pi.on("agent_end", async (event, ctx) => {
     activeCtx = ctx;
-    if (!activeIntent) return;
+    // Only the intent's OWN run may resolve it — an unrelated run ending first
+    // (still unarmed) must not post its text back as the intent verdict.
+    if (!activeIntent || !activeIntent.armed) return;
     const requestId = activeIntent.requestId;
     const finalAssistant = [...event.messages]
       .reverse()
