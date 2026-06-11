@@ -3,7 +3,7 @@
  *
  * Each session (hub, android) runs a tiny node:http server bound to 127.0.0.1 on
  * a port. They POST JSON TransportMessages to each other. Every request carries
- * the shared token in the `x-pi4b-token` header, checked on receipt.
+ * the shared token in the `x-pi-e2e-token` header, checked on receipt.
  * Mismatched/absent token => 401.
  *
  * PORT AUTO-FALLBACK: createTransportServer takes a PREFERRED port and, if it is
@@ -56,10 +56,10 @@ export function tokenMatches(provided: string | undefined, token: string): boole
 }
 
 /** HTTP header that carries the shared token. */
-export const TOKEN_HEADER = "x-pi4b-token";
+export const TOKEN_HEADER = "x-pi-e2e-token";
 
 /** Path all transport POSTs target. */
-export const TRANSPORT_PATH = "/pi4b";
+export const TRANSPORT_PATH = "/pi-e2e";
 
 /** How many consecutive ports to try (preferred, +1, +2, …) before giving up. */
 export const PORT_FALLBACK_TRIES = 20;
