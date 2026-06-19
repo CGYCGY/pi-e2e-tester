@@ -243,24 +243,45 @@ export class Device {
   }
 
   async launch(): Promise<void> {
+    const budget = Math.max(this.timeoutMs, 60000);
     const url = this.resolveLaunchUrl(getAndroidPlatform().launchUrl);
     if (url) {
       // VIEW the dev-client deep link rather than a bare relaunch (which has no
       // bundle URL → dev launcher menu). Raw, UNQUOTED url: adb space-joins argv
       // into the device-shell command, and this exact form is what loads the app
       // (Android's sh leaves the `?` literal); a url with `&` would need quoting.
-      // -W: wait for the activity to come up so the caller's post-launch appstate
-      // reads MainActivity, not a mid-transition DevLauncherActivity.
+      // -W only blocks until an activity exists, which can be a mid-transition
+      // DevLauncherActivity — waitUntilLoaded below is what confirms it's loaded.
       await this.execAdb(
         ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", url, this.androidPackage],
-        Math.max(this.timeoutMs, 60000),
+        budget,
       );
-      return;
+    } else {
+      await this.exec(["open", this.androidPackage, "--relaunch"], budget);
     }
-    await this.exec(
-      ["open", this.androidPackage, "--relaunch"],
-      Math.max(this.timeoutMs, 60000),
-    );
+    await this.waitUntilLoaded(budget);
+  }
+
+  // The launch commands return as soon as an activity exists, which during a
+  // reload is the dev launcher / a mid-load activity, not the loaded app. Poll
+  // appstate until the dev package is foreground AND off any not-ready activity
+  // so callers never report ready over a still-reloading app. Best-effort: at the
+  // deadline, return and let the caller's readiness check make the final call.
+  private async waitUntilLoaded(timeoutMs: number): Promise<void> {
+    const notReady = getAndroidPlatform().notReadyActivities;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        const { package: pkg, activity } = await this.appstate();
+        if (pkg === this.androidPackage && !notReady.some((a) => activity.includes(a))) {
+          return;
+        }
+      } catch {
+        // appstate can fail transiently while the app is restarting; keep polling.
+      }
+      if (Date.now() >= deadline) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 
   // Empty template ⇒ "" (caller does a plain relaunch). A {metroPort} placeholder
