@@ -11,7 +11,7 @@ import { Type } from "typebox";
 import { getDefaults } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import { postToSpoke } from "../shared/transport.ts";
-import type { Verdict } from "../shared/types.ts";
+import type { SpokeRole, Verdict } from "../shared/types.ts";
 import { ensureTestsDirs, safeWorkspacePath } from "../shared/workspace.ts";
 import { type SpokeRegistry } from "./spokes.ts";
 
@@ -55,6 +55,25 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
   const testsDirFor = (kind: "case" | "result") =>
     kind === "case" ? testsDirs.cases : testsDirs.results;
 
+  // isConnected (heartbeating) is NOT isReady (app foreground + loaded): during a
+  // reload the spoke keeps heartbeating while the app reopens. Block until GREEN
+  // so an intent never lands on a still-reloading app. Throws past readyTimeoutMs
+  // (genuinely stuck) or on abort; the spoke's own halted-guard is the backstop.
+  const waitUntilReady = async (target: SpokeRole, signal?: AbortSignal): Promise<void> => {
+    if (registry.isReady(target)) return;
+    const { readyTimeoutMs, readyPollIntervalMs } = getDefaults();
+    const deadline = Date.now() + readyTimeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("messenger intent aborted");
+      await new Promise((r) => setTimeout(r, readyPollIntervalMs));
+      if (registry.isReady(target)) return;
+    }
+    throw new Error(
+      `${target} spoke is connected but its app is not loaded (still reloading?) ` +
+        `after ${readyTimeoutMs}ms — check /status; re-run dev_up if a dependency is down.`,
+    );
+  };
+
   // THE single door to the spoke — the hub never touches the phone directly.
   pi.registerTool({
     name: "messenger",
@@ -88,6 +107,7 @@ export function registerHubTools(pi: ExtensionAPI, deps: HubToolsDeps): void {
             "Check /status; re-run usb_attach / dev_up if a dependency is down.",
         );
       }
+      await waitUntilReady(target, signal);
       const requestId = randomUUID();
       const timeoutMs = getDefaults().intentTimeoutMs;
       const spokePort = registry.port(target);
