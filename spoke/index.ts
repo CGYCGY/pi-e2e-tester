@@ -82,6 +82,7 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const androidPackage = platform.androidPackage;
   const crashLogTag = platform.crashLogTag;
   const notReadyActivities = platform.notReadyActivities;
+  const readyMarker = platform.readyMarker;
   const metroPort = getMetroPort();
 
   // Built-in tools are gated off, so this workspace is the spoke's only filesystem surface.
@@ -107,6 +108,13 @@ export default function spokeExtension(pi: ExtensionAPI) {
   let cumulativeCost = 0; // summed from assistant usage.cost.total
   let deviceReady = true; // last known adb reachability (drives the widget)
   let lastForeground: string | undefined; // last observed foreground package
+  // Re-entrancy guard: idle heartbeat re-verifies must not stack while a prior
+  // verify (esp. a blocking relaunch) is still running.
+  let verifyInFlight = false;
+  // When OUR app first went foreground-but-not-loaded. Drives idle stuck-recovery:
+  // relaunch only after it stays stuck past RECOVERY_GRACE_MS, so a normal cold
+  // start / fast-refresh reload (which finishes on its own) is never interrupted.
+  let notLoadedSince: number | undefined;
 
   // Serialized to ONE in-flight intent (one phone per spoke).
   // `armed` flips true on the FIRST agent_start after dispatch — the intent's OWN
@@ -271,13 +279,28 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   const onNotReadyActivity = (activity: string): boolean =>
     notReadyActivities.some((a) => activity.includes(a));
 
-  // opts.launch: when reachable but the app isn't loaded (not foreground, or parked
-  // on the dev launcher), launch it (pass on establish-paths; omit at idle so we
-  // don't fight the user's foreground app).
-  const verifyReady = async (opts?: { launch?: boolean }): Promise<void> => {
+  // How long OUR app may sit foreground-but-not-loaded before idle self-heal
+  // relaunches it. Must exceed a normal cold start / fast-refresh reload (which
+  // finish on their own) so recovery never cuts a legitimate load short.
+  const RECOVERY_GRACE_MS = 30_000;
+
+  // The marker is the only signal separating a RENDERED app from one still
+  // splashing / bundling / reloading — appstate stays identical across all of them.
+  const computeLoaded = async (activity: string): Promise<boolean> => {
+    if (lastForeground !== androidPackage || onNotReadyActivity(activity)) return false;
+    return device.markerVisible(readyMarker);
+  };
+
+  // opts.launch (establish paths: session_start / resume / reset): relaunch whenever
+  // not loaded. opts.recover (idle heartbeat): relaunch ONLY our own foreground-but-
+  // stuck app, and only past the grace window — never fight a DIFFERENT foreground
+  // app the user switched to, and never cut short a load still in progress.
+  const verifyReady = async (opts?: { launch?: boolean; recover?: boolean }): Promise<void> => {
+    verifyInFlight = true;
     try {
       const reachable = await device.isReachable();
       if (!reachable) {
+        notLoadedSince = undefined;
         reportStatus("needs-device", `device ${deviceCfg.serial} not reachable (USB detached?).`);
         return;
       }
@@ -291,29 +314,41 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       }
       markConnected(role);
 
-      const loaded = (): boolean =>
-        lastForeground === androidPackage && !onNotReadyActivity(activity);
+      let loaded = await computeLoaded(activity);
 
-      if (!loaded() && opts?.launch) {
+      // A different foreground isn't "stuck" (don't fight the user) — only our own
+      // app, foreground yet not loaded, starts the recovery clock.
+      const onOurApp = lastForeground === androidPackage;
+      if (!loaded && onOurApp) notLoadedSince ??= Date.now();
+      else notLoadedSince = undefined;
+
+      const stuckLongEnough =
+        notLoadedSince !== undefined && Date.now() - notLoadedSince >= RECOVERY_GRACE_MS;
+      const doLaunch =
+        !loaded && (Boolean(opts?.launch) || Boolean(opts?.recover && onOurApp && stuckLongEnough));
+
+      if (doLaunch) {
         // Reverse must be re-applied BEFORE launch, not after (see reverseTcp).
         if (metroPort) await device.reverseTcp(metroPort);
         try {
-          await device.launch();
+          await device.launch(); // blocks until the readyMarker is visible (or deadline)
           const state = await device.appstate();
           lastForeground = state.package || undefined;
           activity = state.activity;
         } catch {
           /* launch failed — fall through to the status below */
         }
+        loaded = await computeLoaded(activity);
+        if (loaded) notLoadedSince = undefined;
       }
 
-      if (loaded()) {
-        reportStatus("ready", `device ${deviceCfg.serial} reachable; app "${androidPackage}".`);
+      if (loaded) {
+        reportStatus("ready", `device ${deviceCfg.serial} reachable; app "${androidPackage}" loaded.`);
       } else if (lastForeground === androidPackage) {
         reportStatus(
           "wrong-target",
-          `app "${androidPackage}" foreground but on "${activity}" — not loaded ` +
-            `(dev launcher / Metro bundle not connected).`,
+          `app "${androidPackage}" foreground but NOT loaded — on "${activity}" ` +
+            `(splash / bundling / reloading${readyMarker ? `; ${readyMarker} not visible` : ""}).`,
         );
       } else {
         reportStatus(
@@ -325,6 +360,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       roleLog.error("verifyReady failed", { err: String(err) });
       deviceReady = false;
       reportStatus("error", `verification error: ${(err as Error).message}`);
+    } finally {
+      verifyInFlight = false;
     }
   };
 
@@ -513,6 +550,10 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     }
     roleLog.info("spoke reset", { device: deviceDetail, context: contextDetail });
     refreshUI();
+    // cold-reset force-stopped the app, so foreground is now the launcher — idle
+    // recover won't relaunch that. Bring it back here; fire-and-forget so the ACK
+    // doesn't block on a launch.
+    void verifyReady({ launch: true });
     return { ok: true, detail: `${contextDetail}; ${deviceDetail}` };
   };
 
@@ -570,15 +611,14 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     roleLog.info("spoke transport listening", { port: server.port, role });
   };
 
-  // When halted, re-attempt readiness each beat so re-plugging the device
-  // auto-recovers. verifyReady returns early at needs-device BEFORE launching, so
-  // launch() never fires while the phone is absent.
+  // Re-verify EVERY beat (old code only did when halted), so a reload wedged inside
+  // MainActivity self-heals instead of staying false-green. Heartbeat first: the hub
+  // must see liveness even through a blocking relaunch. halted ⇒ launch so re-plugging
+  // recovers (verifyReady no-ops at needs-device before launching).
   const heartbeatTick = (): void => {
-    if (halted) {
-      void verifyReady({ launch: true }).then(() => sendHeartbeat());
-    } else {
-      sendHeartbeat();
-    }
+    sendHeartbeat();
+    if (activeIntent || verifyInFlight || shuttingDown) return;
+    void verifyReady(halted ? { launch: true } : { recover: true });
   };
 
   // Announce our RESOLVED port (may differ from config after auto-fallback) so the

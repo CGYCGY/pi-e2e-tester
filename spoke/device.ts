@@ -262,18 +262,36 @@ export class Device {
     await this.waitUntilLoaded(budget);
   }
 
-  // The launch commands return as soon as an activity exists, which during a
-  // reload is the dev launcher / a mid-load activity, not the loaded app. Poll
-  // appstate until the dev package is foreground AND off any not-ready activity
-  // so callers never report ready over a still-reloading app. Best-effort: at the
-  // deadline, return and let the caller's readiness check make the final call.
+  // Empty marker ⇒ true (caller falls back to foreground/activity alone). An absent
+  // marker is a non-zero `is` exit, not a throw — so a not-rendered app reads false.
+  async markerVisible(marker: string): Promise<boolean> {
+    if (!marker) return true;
+    try {
+      const { ok } = await this.is("visible", marker);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // am start returns as soon as an activity exists; the activity then stays
+  // MainActivity through splash → JS-bundle eval → reload, so package+activity
+  // alone false-greens on a blank/reloading app. The readyMarker is the only signal
+  // that the app actually rendered. Best-effort: at the deadline, return and let the
+  // caller's readiness check decide.
   private async waitUntilLoaded(timeoutMs: number): Promise<void> {
-    const notReady = getAndroidPlatform().notReadyActivities;
+    const platform = getAndroidPlatform();
+    const notReady = platform.notReadyActivities;
+    const marker = platform.readyMarker;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       try {
         const { package: pkg, activity } = await this.appstate();
-        if (pkg === this.androidPackage && !notReady.some((a) => activity.includes(a))) {
+        if (
+          pkg === this.androidPackage &&
+          !notReady.some((a) => activity.includes(a)) &&
+          (await this.markerVisible(marker))
+        ) {
           return;
         }
       } catch {

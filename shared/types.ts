@@ -232,6 +232,16 @@ export interface AndroidPlatformConfig {
    */
   notReadyActivities: string[];
   /**
+   * OPTIONAL agent-device selector for a UI marker the app renders ONLY once it is
+   * actually loaded and interactive (e.g. a root `testID` present on every screen).
+   * When set, readiness requires this marker visible — so the hub greens ONLY on a
+   * rendered app, never on the native activity while it is still splashing,
+   * bundling, or reloading (all of which keep the same foreground activity). Form:
+   * `id="app-loaded"` (RN testID → resource-id), `label="…"`, or `text="…"`.
+   * Empty ⇒ foreground package + activity alone count as loaded (back-compat).
+   */
+  readyMarker: string;
+  /**
    * OPTIONAL deep link `launch` opens instead of a bare relaunch. An Expo dev build
    * relaunched with no URL parks on its launcher menu, so it needs the Metro URL
    * handed in via the app's OWN scheme (not the package id). `{metroPort}` is
