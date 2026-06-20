@@ -21,9 +21,12 @@ export interface CrashGuardResult {
 }
 
 // Fail CLOSED on an unreadable foreground (detached device / opaque surface).
+// allowedPackages are tolerated besides expectedPackage (e.g. an OAuth Custom Tab
+// the sign-in flow legitimately hands off to) — acting there isn't refused.
 export async function assertOnTarget(
   device: Device,
   expectedPackage: string,
+  allowedPackages: string[],
   log: Logger,
 ): Promise<TargetGuardResult> {
   let observed: string | null = null;
@@ -44,10 +47,11 @@ export async function assertOnTarget(
     };
   }
 
-  if (observed !== expectedPackage) {
+  if (observed !== expectedPackage && !allowedPackages.includes(observed)) {
+    const alsoOk = allowedPackages.length ? ` (or ${allowedPackages.join(", ")})` : "";
     return {
       ok: false,
-      reason: `wrong target: expected foreground "${expectedPackage}" but observed "${observed}"`,
+      reason: `wrong target: expected foreground "${expectedPackage}"${alsoOk} but observed "${observed}"`,
       expected: expectedPackage,
       observed,
     };

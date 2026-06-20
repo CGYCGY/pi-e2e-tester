@@ -80,6 +80,7 @@ export default function spokeExtension(pi: ExtensionAPI) {
   const platform = getAndroidPlatform();
   const deviceCfg = platform.device;
   const androidPackage = platform.androidPackage;
+  const allowedForegroundPackages = platform.allowedForegroundPackages;
   const crashLogTag = platform.crashLogTag;
   const notReadyActivities = platform.notReadyActivities;
   const readyMarker = platform.readyMarker;
@@ -157,7 +158,7 @@ ${profile.submitHint}
 
 ${getRulesForSpoke(role)}
 
-The acting verbs (tap/type/key/app) run two deterministic guards in code: a wrong-target guard (refuses to act unless ${androidPackage} is foreground) and a crash-guard (fails the step if new ${crashLogTag} errors appear). If a guard refuses or trips, that is a real failure — report it.
+The acting verbs (tap/type/key/app) run two deterministic guards in code: a wrong-target guard (refuses to act unless ${androidPackage}${allowedForegroundPackages.length ? ` — or one of these allowed handoff apps: ${allowedForegroundPackages.join(", ")} (e.g. the browser an OAuth/SSO sign-in opens; act in it normally to complete the flow)` : ""} is foreground) and a crash-guard (fails the step if new ${crashLogTag} errors appear). If a guard refuses or trips, that is a real failure — report it.
 
 End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\` or \`VERDICT: FAIL\`. Your final text is sent back to the hub verbatim.`;
 
@@ -372,7 +373,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     action: () => Promise<void>,
   ): Promise<{ crash: string | null }> => {
     // PRE: wrong-target guard (do not trust the LLM; re-read foreground in code).
-    const tgt = await assertOnTarget(device, androidPackage, roleLog);
+    const tgt = await assertOnTarget(device, androidPackage, allowedForegroundPackages, roleLog);
     lastForeground = tgt.observed ?? undefined;
     refreshUI();
     if (!tgt.ok) {

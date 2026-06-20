@@ -154,6 +154,7 @@ function parseConfig(raw: unknown, appName: string): Config {
     return {
       kind: "android",
       androidPackage: reqIn(a, "platforms.android", "androidPackage"),
+      allowedForegroundPackages: strArray(a.allowedForegroundPackages, []),
       crashLogTag: reqIn(a, "platforms.android", "crashLogTag"),
       crashSignature: reqIn(a, "platforms.android", "crashSignature"),
       resetPaths: strArray(a.resetPaths, []),

@@ -66,6 +66,8 @@
     "android": {
       "androidPackage": "com.yourcompany.yourapp.dev",
       "_androidPackage_note": "REQUIRED. Dev build package id, already installed (+ ideally logged in) on the test device. The wrong-target guard asserts foreground == this; `app cold-reset` is guarded to this id only. Find via `adb shell pm list packages | grep <yourapp>`.",
+      "allowedForegroundPackages": [],
+      "_allowedForegroundPackages_note": "OPTIONAL. Extra foreground packages the wrong-target guard TOLERATES besides androidPackage, so an acting verb (tap/type/key) isn't refused when a test legitimately leaves the app — chiefly an OAuth/SSO sign-in that hands off to a browser Custom Tab. Exact match, NOT substring. Readiness is unaffected (the spoke still greens ONLY on the loaded app, so a handoff app shows wrong-target/amber) — these are merely not REFUSED. Empty [] ⇒ only androidPackage may be acted on. Find the Custom Tab host WHILE the sign-in page is up: `adb shell dumpsys activity activities | grep mResumedActivity` (e.g. Samsung Internet \"com.sec.android.app.sbrowser\", Chrome \"com.android.chrome\").",
       "crashLogTag": "ReactNativeJS",
       "_crashLogTag_note": "REQUIRED. logcat tag the crash-guard watches + stamps markers under. RN apps log under ReactNativeJS; a native/Flutter app uses another tag (e.g. `flutter`).",
       "crashSignature": "(^|\\s)E[\\/\\s]ReactNativeJS|\\bE ReactNativeJS\\b",

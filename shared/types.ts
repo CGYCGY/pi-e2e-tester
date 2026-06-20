@@ -217,6 +217,17 @@ export interface AndroidPlatformConfig {
   kind: "android";
   /** Dev app id under test (guards pin to this). REQUIRED. */
   androidPackage: string;
+  /**
+   * Foreground packages, BESIDES androidPackage, the wrong-target guard tolerates so
+   * an acting verb isn't refused when a test legitimately leaves the app — chiefly an
+   * OAuth/SSO sign-in that hands off to a browser Custom Tab (e.g. WorkOS →
+   * "com.sec.android.app.sbrowser" / "com.android.chrome"). Exact match, NOT substring.
+   * Readiness is unaffected (the spoke still greens only on the loaded app, so these
+   * read as wrong-target/amber) — they are merely not REFUSED. Empty ⇒ only
+   * androidPackage may be acted on. Find the Custom Tab host mid-sign-in via
+   * `adb shell dumpsys activity activities | grep mResumedActivity`.
+   */
+  allowedForegroundPackages: string[];
   /** logcat tag the crash-guard watches + stamps markers under. REQUIRED. */
   crashLogTag: string;
   /** RegExp source for a crash-error log line. A generic fallback is always also applied in code. REQUIRED. */
