@@ -38,6 +38,12 @@ propagates (`HUB_PORT` spawn env hub→spoke, `register{port}` message spoke→h
 tails for the real ready signal, with `adb devices` / `curl :8081/status` probe
 backstops). **You never signal ready.**
 
+**One run per role log:** the role logs (`hub.log`, `android.log`) hold only the
+CURRENT run — each process archives the previous run to `logs/<app>/history/` at
+startup (newest 20 kept), so reading a role log shows just this run, not a
+growing pile. The dev logs (`convex`/`metro`/`usbipd`) are truncated in place,
+since the hub regex-scans them for the ready signal.
+
 ---
 
 ## Prerequisites
