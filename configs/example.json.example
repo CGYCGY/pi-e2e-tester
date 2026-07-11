@@ -27,7 +27,7 @@
   "_icons_note": "Per-platform glyph in the status widget. Emoji by default; set to ASCII (e.g. \"android\": \"AND\") on terminals without emoji support.",
 
   "hub": {
-    "model": "openai-codex/gpt-5.5",
+    "model": "openai-codex/gpt-5.6-sol",
     "thinking": "high"
   },
   "_hub_note": "Hub orchestrates + judges verdicts, so a high reasoning tier fits. Any model id your pi install is configured for.",
@@ -97,7 +97,7 @@
       },
       "spokePort": 7201,
       "_spokePort_note": "REQUIRED. PREFERRED transport port for this platform's spoke (auto-falls back; resolved value reported back via register). Give each platform a DISTINCT port so two spokes can run at once.",
-      "model": "openai-codex/gpt-5.5",
+      "model": "openai-codex/gpt-5.6-terra",
       "thinking": "medium",
       "_model_note": "OPTIONAL spoke model/thinking. The spoke drives the device mechanically, so a medium tier usually suffices. Omit to use pi's default.",
       "probeAdb": "adb -s {serial} get-state",

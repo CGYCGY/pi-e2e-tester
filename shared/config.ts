@@ -215,7 +215,7 @@ function parseConfig(raw: unknown, appName: string): Config {
 
   const h = isObject(r.hub) ? r.hub : {};
   const hub: HubConfig = {
-    model: str(h.model, "openai-codex/gpt-5.5"),
+    model: str(h.model, "openai-codex/gpt-5.6-sol"),
     thinking: str(h.thinking, "high"),
   };
 
