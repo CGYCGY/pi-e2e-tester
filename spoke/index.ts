@@ -124,8 +124,13 @@ export default function spokeExtension(pi: ExtensionAPI) {
   // posted back as the intent answer.
   let activeIntent: { requestId: string; armed: boolean } | null = null;
   let activeIntentTimer: ReturnType<typeof setTimeout> | undefined;
-  // Set by an acting verb when a guard fails; if still set at agent_end, the
-  // verdict is FORCED to FAIL regardless of the LLM's text.
+  // Final text of the intent run's latest agent_end. pi may follow an agent_end
+  // with an auto-retry, a compaction retry, or a queued continuation, so the run
+  // that ends is not always the run that answers: each capture overwrites the
+  // last, and only agent_settled promotes one to the verdict.
+  let capturedIntentText: string | null = null;
+  // Set by an acting verb when a guard fails; if still set when the intent
+  // resolves, the verdict is FORCED to FAIL regardless of the LLM's text.
   let guardTrip: { kind: "wrong-target" | "crash"; detail: string } | null = null;
 
   // Dead-man's switch (covers an ABRUPT hub kill with no graceful broadcast).
@@ -405,6 +410,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       activeIntentTimer = undefined;
     }
     activeIntent = null;
+    capturedIntentText = null;
     const trip = guardTrip;
     guardTrip = null;
 
@@ -687,14 +693,15 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI(ctx);
   });
 
-  // Capture the intent turn's final answer: the last assistant message's text
-  // blocks → verdict. This agent_end capture is the spec's #1 runtime risk.
+  // CAPTURE the intent run's final answer (last assistant message's text blocks);
+  // agent_settled below promotes it to the verdict. This capture-then-settle split
+  // is the spec's #1 runtime risk: resolving straight from agent_end would score
+  // the pre-retry text whenever pi retries or continues after this run.
   pi.on("agent_end", async (event, ctx) => {
     activeCtx = ctx;
-    // Only the intent's OWN run may resolve it — an unrelated run ending first
+    // Only the intent's OWN run may answer it — an unrelated run ending first
     // (still unarmed) must not post its text back as the intent verdict.
     if (!activeIntent || !activeIntent.armed) return;
-    const requestId = activeIntent.requestId;
     const finalAssistant = [...event.messages]
       .reverse()
       .find((m) => m.role === "assistant");
@@ -708,7 +715,16 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
         .join("")
         .trim();
     }
-    finishIntent(requestId, true, text);
+    capturedIntentText = text;
+  });
+
+  // RESOLVE the intent. pi guarantees no automatic retry, compaction retry, or
+  // queued continuation remains once agent_settled fires, so the last captured
+  // text is the run's real final answer.
+  pi.on("agent_settled", async (_event, ctx) => {
+    activeCtx = ctx;
+    if (!activeIntent || !activeIntent.armed) return;
+    finishIntent(activeIntent.requestId, true, capturedIntentText ?? "");
   });
 
   pi.on("session_shutdown", async () => {

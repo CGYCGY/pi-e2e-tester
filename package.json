@@ -10,9 +10,9 @@
     "test": "bun test shared/"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.1",
-    "@earendil-works/pi-tui": "^0.78.1",
-    "@sinclair/typebox": "^0.34.49",
+    "@earendil-works/pi-coding-agent": "^0.84.0",
+    "@earendil-works/pi-tui": "^0.84.0",
+    "typebox": "1.3.7",
     "@types/bun": "^1.3.14",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
