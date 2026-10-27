@@ -141,9 +141,7 @@ export default function spokeExtension(pi: ExtensionAPI) {
   // getRulesForSpoke (app/platform rules markdown). A hardcoded-wrong hint is worse
   // than none here (it's the spoke's only knowledge), so layers 2-3 come from
   // config/profile, never literals. The code guards are the floor.
-  const SPOKE_RULES = `
-
-## pi-e2e-tester android spoke
+  const SPOKE_RULES = `## pi-e2e-tester android spoke
 You are the android spoke. You drive \`${androidPackage}\` on a REAL phone via these verbs (built-in tools are DISABLED — these are all you have):
 - observe — a11y snapshot + foreground app/activity (CHEAP; your default eyes; read-only).
 - look — screenshot the phone; returns a file NAME. View it via read_screenshot ONLY when color/layout/vision actually matters.
@@ -664,9 +662,9 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI(ctx);
   });
 
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: event.systemPrompt + SPOKE_RULES,
-  }));
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.sections["e2e-spoke"] = SPOKE_RULES;
+  });
 
   pi.on("turn_start", async (_event, ctx) => {
     activeCtx = ctx;

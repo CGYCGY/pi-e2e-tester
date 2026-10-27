@@ -60,9 +60,7 @@ const VERDICT_TYPE = "expari-verdict";
 // How long to let a recipe's group exit on its own SIGINT before SIGKILLing it.
 const RECIPE_STOP_GRACE_MS = 5000;
 
-const HUB_RULES = `
-
-You are the HUB of the pi-e2e-tester harness. You orchestrate an android spoke that drives a real test phone (the app under test's dev build). You CANNOT see or touch the phone yourself.
+const HUB_RULES = `You are the HUB of the pi-e2e-tester harness. You orchestrate an android spoke that drives a real test phone (the app under test's dev build). You CANNOT see or touch the phone yourself.
 
 For ANY android test request — opening the app, tapping, typing, reading a screen, asserting a state — you MUST use the \`messenger\` tool: \`messenger({ target: "android", intent: "<plain-language instruction>" })\`. The spoke's own LLM interprets the intent, drives the device, and returns a verdict (PASS|FAIL) plus text.
 
@@ -589,9 +587,9 @@ export default function (pi: ExtensionAPI) {
     log.info(`hub transport listening on ${host}:${resolvedHubPort}`);
   }
 
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: event.systemPrompt + HUB_RULES,
-  }));
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.sections["e2e-hub"] = HUB_RULES;
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx;
