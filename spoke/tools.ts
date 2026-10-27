@@ -40,6 +40,11 @@ export interface SpokeToolDeps {
   setGuardTrip: (v: { kind: "wrong-target" | "crash"; detail: string } | null) => void;
 }
 
+// pi runs the tool calls of one assistant message in parallel unless any of them is
+// "sequential" (then the whole batch is). Every verb that touches the phone shares
+// the foreground, the logcat crash marker and guardTrip, so interleaving two (a tap
+// racing an app stop, or two verbs' crash scans) would cross their guard results.
+// read_screenshot / read_creds are pure file reads and left unmarked.
 export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void {
   const {
     device,
@@ -60,6 +65,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "observe",
     label: "Observe (a11y + appstate)",
+    executionMode: "sequential",
     description:
       "Read the screen cheaply: the accessibility-tree snapshot (text + @eN refs " +
       "you can tap) plus the foreground app/activity. Read-only — your DEFAULT eyes. " +
@@ -116,6 +122,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "look",
     label: "Look (screenshot)",
+    executionMode: "sequential",
     description:
       "Capture a screenshot of the phone to a PNG in the project's screenshots dir " +
       "(downscaled to <=1200px) and return its FILE NAME. Use this ONLY when color, " +
@@ -194,6 +201,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "tap",
     label: "Tap (guarded)",
+    executionMode: "sequential",
     description:
       "Tap the screen. Target is coordinates \"x y\", an @ref from observe, or a " +
       "selector (e.g. id=\"submit\" or label=\"Allow\"). GUARDED in code: refuses " +
@@ -229,6 +237,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "type",
     label: "Type (guarded, auth-submit)",
+    executionMode: "sequential",
     description:
       "Type text into the currently focused field. GUARDED in code (wrong-target + " +
       "crash-guard). Pass submit:true (the DEFAULT) to submit the field after typing " +
@@ -279,6 +288,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "key",
     label: "Key (guarded)",
+    executionMode: "sequential",
     description:
       "Send a hardware key event (e.g. 'enter', 'back', 'tab'). GUARDED in code " +
       "(wrong-target + crash-guard). Use key('enter') to submit a focused field per " +
@@ -313,6 +323,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "assert",
     label: "Assert (UI predicate)",
+    executionMode: "sequential",
     description:
       "Check a UI predicate on a selector and report whether it holds. Predicate is " +
       "one of visible | hidden | exists | editable | selected | text. For 'text', " +
@@ -362,6 +373,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "app",
     label: "App (launch/stop/cold-reset)",
+    executionMode: "sequential",
     description:
       `Control the dev app ${androidPackage}: action 'launch' (relaunch it), 'stop' ` +
       "(force-stop), or 'cold-reset' (force a true signed-out first run by removing " +
@@ -438,6 +450,7 @@ export function registerSpokeTools(pi: ExtensionAPI, deps: SpokeToolDeps): void 
   pi.registerTool({
     name: "logcat",
     label: `Logcat (${crashLogTag})`,
+    executionMode: "sequential",
     description:
       "Pull recent " + crashLogTag + " log lines from the device — the silent app " +
       "errors observe/look can't see (e.g. red-box / unhandled exceptions). Use this " +
