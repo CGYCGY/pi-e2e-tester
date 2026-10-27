@@ -36,6 +36,7 @@ import type {
 import { registerSpokeCommands } from "./commands.ts";
 import { Device } from "./device.ts";
 import { assertOnTarget, scanForCrash } from "./guards.ts";
+import { createIntentLifecycle } from "./intent.ts";
 import { getProfile } from "./profiles/index.ts";
 import { registerSpokeTools } from "./tools.ts";
 
@@ -117,18 +118,16 @@ export default function spokeExtension(pi: ExtensionAPI) {
   // start / fast-refresh reload (which finishes on its own) is never interrupted.
   let notLoadedSince: number | undefined;
 
-  // Serialized to ONE in-flight intent (one phone per spoke).
-  // `armed` flips true on the FIRST agent_start after dispatch — the intent's OWN
-  // run beginning. An unrelated run already executing (operator typing in the TUI)
-  // fires agent_end first; agent_end ignores it until armed so its text can't be
-  // posted back as the intent answer.
-  let activeIntent: { requestId: string; armed: boolean } | null = null;
+  // Serialized to ONE in-flight intent (one phone per spoke); see intent.ts for
+  // how the intent is correlated with the run that answers it.
+  // isIdle() is also false while a run is still starting (pi >= 1.2), so a plain
+  // sendUserMessage there is rejected ("Agent is already processing"); followUp
+  // queues it into that run instead.
+  const intents = createIntentLifecycle((intent) => {
+    if (activeCtx?.isIdle()) pi.sendUserMessage(intent);
+    else pi.sendUserMessage(intent, { deliverAs: "followUp" });
+  });
   let activeIntentTimer: ReturnType<typeof setTimeout> | undefined;
-  // Final text of the intent run's latest agent_end. pi may follow an agent_end
-  // with an auto-retry, a compaction retry, or a queued continuation, so the run
-  // that ends is not always the run that answers: each capture overwrites the
-  // last, and only agent_settled promotes one to the verdict.
-  let capturedIntentText: string | null = null;
   // Set by an acting verb when a guard fails; if still set when the intent
   // resolves, the verdict is FORCED to FAIL regardless of the LLM's text.
   let guardTrip: { kind: "wrong-target" | "crash"; detail: string } | null = null;
@@ -397,20 +396,19 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   };
 
   // The requestId guard ensures only the CURRENT intent resolves — a late timer or
-  // a stray agent_end after we've already answered is ignored.
+  // a stray agent_settled after we've already answered is ignored.
   const finishIntent = (
     requestId: string,
     ok: boolean,
     finalText: string,
     error?: string,
   ): void => {
-    if (!activeIntent || activeIntent.requestId !== requestId) return;
+    if (intents.requestId !== requestId) return;
     if (activeIntentTimer) {
       clearTimeout(activeIntentTimer);
       activeIntentTimer = undefined;
     }
-    activeIntent = null;
-    capturedIntentText = null;
+    intents.end();
     const trip = guardTrip;
     guardTrip = null;
 
@@ -459,7 +457,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     timeoutMs: number | undefined,
   ): Promise<void> => {
     // SERIALIZE: one LLM-driven intent at a time (one phone per spoke).
-    if (activeIntent) {
+    if (intents.requestId) {
       roleLog.warn("intent rejected: another intent in flight", { requestId });
       void postToHub(
         {
@@ -496,33 +494,25 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
       return;
     }
 
-    activeIntent = { requestId, armed: false };
     guardTrip = null; // fresh turn: clear any stale guard trip
 
+    // pi.sendUserMessage never throws: a rejected prompt surfaces only as an
+    // extension_error the spoke can't observe, so the known rejection (manual
+    // compaction) is avoided up front and anything else falls to this timeout.
     const timeout = timeoutMs ?? defaults.intentTimeoutMs;
     activeIntentTimer = setTimeout(() => {
       roleLog.warn("intent timed out", { requestId, timeout });
       finishIntent(requestId, false, "", "intent timed out");
     }, timeout);
 
-    // The turn's final text is captured in agent_end → verdict → POSTed back.
     roleLog.info("intent received; waking spoke LLM", { requestId, intent });
-    try {
-      if (activeCtx?.isIdle()) {
-        pi.sendUserMessage(intent);
-      } else {
-        pi.sendUserMessage(intent, { deliverAs: "followUp" });
-      }
-    } catch (err) {
-      roleLog.error("intent dispatch failed", { requestId, err: String(err) });
-      finishIntent(requestId, false, "", `intent dispatch failed: ${(err as Error).message}`);
-    }
+    intents.begin(requestId, intent);
   };
 
   // FRESH TEST START (hub /reset): cold-reset the dev app + shed LLM context.
   const handleReset = async (): Promise<{ ok: boolean; detail: string }> => {
     // Refuse mid-intent: shedding context during a turn would orphan it.
-    if (activeIntent) {
+    if (intents.requestId) {
       roleLog.warn("reset rejected: intent in flight");
       return { ok: false, detail: "intent in flight — reset after it finishes" };
     }
@@ -543,16 +533,25 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     try {
       const usage = activeCtx?.getContextUsage();
       if (activeCtx && usage?.tokens != null && usage.tokens > 2000) {
+        // Held from the call, not from session_before_compact: compact() first
+        // awaits abort() of any running turn, and an intent dispatched into that
+        // window would be queued onto the run being aborted.
+        intents.compactionStarted();
         activeCtx.compact({
           customInstructions:
             "A brand-new, UNRELATED test is starting. Discard everything about the " +
             "previous test — its steps, observations, taps, and verdict are over and " +
             "must NOT influence the next one. Summarize to a single line: 'fresh test start'.",
-          onError: (e) => roleLog.warn("reset: compaction failed", { err: e.message }),
+          onComplete: () => intents.compactionEnded(),
+          onError: (e) => {
+            roleLog.warn("reset: compaction failed", { err: e.message });
+            intents.compactionEnded();
+          },
         });
         contextDetail = "context cleared";
       }
     } catch (err) {
+      intents.compactionEnded();
       roleLog.warn("reset: compact failed", { err: String(err) });
     }
     roleLog.info("spoke reset", { device: deviceDetail, context: contextDetail });
@@ -577,8 +576,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     server = await createTransportServer({
       port: getPort(role),
       handlers: {
-        // ACK synchronously; the final answer is captured at agent_end and POSTed
-        // back as an IntentResultMessage.
+        // ACK synchronously; the final answer is captured at agent_end, resolved at
+        // agent_settled and POSTed back as an IntentResultMessage.
         intent: (msg) => {
           void handleIntent(msg.requestId, msg.intent, msg.timeoutMs);
           return { ok: true, accepted: true };
@@ -624,7 +623,7 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   // recovers (verifyReady no-ops at needs-device before launching).
   const heartbeatTick = (): void => {
     sendHeartbeat();
-    if (activeIntent || verifyInFlight || shuttingDown) return;
+    if (intents.requestId || verifyInFlight || shuttingDown) return;
     void verifyReady(halted ? { launch: true } : { recover: true });
   };
 
@@ -672,13 +671,8 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
   pi.on("turn_start", async (_event, ctx) => {
     activeCtx = ctx;
   });
-  // Arm the pending intent when ITS agent run starts. A run already in flight when
-  // the intent queued fired agent_start earlier, so it stays unarmed and its
-  // agent_end is ignored below. agent_start fires once per run (turn_start is
-  // per tool-loop turn — too granular to correlate a run).
   pi.on("agent_start", async (_event, ctx) => {
     activeCtx = ctx;
-    if (activeIntent && !activeIntent.armed) activeIntent.armed = true;
   });
   pi.on("message_end", async (event, ctx) => {
     activeCtx = ctx;
@@ -693,15 +687,13 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     refreshUI(ctx);
   });
 
-  // CAPTURE the intent run's final answer (last assistant message's text blocks);
-  // agent_settled below promotes it to the verdict. This capture-then-settle split
-  // is the spec's #1 runtime risk: resolving straight from agent_end would score
-  // the pre-retry text whenever pi retries or continues after this run.
+  // CAPTURE the run's final answer (last assistant message's text blocks);
+  // agent_settled below promotes it to the verdict. Resolving straight from
+  // agent_end would score the pre-retry text whenever pi retries or continues
+  // after this run.
   pi.on("agent_end", async (event, ctx) => {
     activeCtx = ctx;
-    // Only the intent's OWN run may answer it — an unrelated run ending first
-    // (still unarmed) must not post its text back as the intent verdict.
-    if (!activeIntent || !activeIntent.armed) return;
+    if (!intents.requestId) return;
     const finalAssistant = [...event.messages]
       .reverse()
       .find((m) => m.role === "assistant");
@@ -715,16 +707,26 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
         .join("")
         .trim();
     }
-    capturedIntentText = text;
+    intents.captureAgentEnd(text);
   });
 
-  // RESOLVE the intent. pi guarantees no automatic retry, compaction retry, or
-  // queued continuation remains once agent_settled fires, so the last captured
-  // text is the run's real final answer.
   pi.on("agent_settled", async (_event, ctx) => {
     activeCtx = ctx;
-    if (!activeIntent || !activeIntent.armed) return;
-    finishIntent(activeIntent.requestId, true, capturedIntentText ?? "");
+    const settled = intents.settle();
+    if (settled) finishIntent(settled.requestId, settled.ok, settled.text, settled.error);
+  });
+
+  // An operator /compact in this spoke's TUI blocks prompts just like /reset's.
+  // session_compact fires before pi clears its manual-compaction flag (prompts
+  // still throw until then), so release on the next tick.
+  pi.on("session_before_compact", (event) => {
+    if (event.reason === "manual") intents.compactionStarted();
+  });
+  pi.on("session_compact", (event) => {
+    if (event.reason === "manual") setTimeout(() => intents.compactionEnded(), 0);
+  });
+  pi.on("session_compact_failed", (event) => {
+    if (event.reason === "manual") setTimeout(() => intents.compactionEnded(), 0);
   });
 
   pi.on("session_shutdown", async () => {

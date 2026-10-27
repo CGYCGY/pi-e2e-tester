@@ -22,9 +22,9 @@ default:
 typecheck:
     @cd "{{project_dir}}" && bunx tsc --noEmit
 
-# Guard regression tests: the in-code path guard + transport token compare.
+# Regression tests (shared/ + spoke/): path guard, token compare, logs, intent lifecycle.
 test:
-    @cd "{{project_dir}}" && bun test shared/
+    @cd "{{project_dir}}" && bun test shared/ spoke/
 
 # Expand a leading ~ against $HOME (mirrors shared/config.ts expandTilde).
 _expand path:

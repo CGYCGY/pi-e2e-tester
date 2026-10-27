@@ -7,7 +7,7 @@
   "description": "Standalone agentic end-to-end tester for mobile/web apps, built on pi (hub + android/web/ios spokes).",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test shared/"
+    "test": "bun test shared/ spoke/"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
