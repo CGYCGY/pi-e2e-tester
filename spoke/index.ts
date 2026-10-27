@@ -710,9 +710,9 @@ End EVERY turn with a SHORT final summary, then a line exactly: \`VERDICT: PASS\
     intents.captureAgentEnd(text);
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     activeCtx = ctx;
-    const settled = intents.settle();
+    const settled = intents.settle(event.aborted);
     if (settled) finishIntent(settled.requestId, settled.ok, settled.text, settled.error);
   });
 

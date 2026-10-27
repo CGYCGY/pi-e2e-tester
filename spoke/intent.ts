@@ -25,7 +25,7 @@ export interface IntentLifecycle {
   compactionStarted(): void;
   compactionEnded(): void;
   captureAgentEnd(text: string): void;
-  settle(): IntentSettlement | null;
+  settle(aborted: boolean): IntentSettlement | null;
 }
 
 export function createIntentLifecycle(dispatch: (intent: string) => void): IntentLifecycle {
@@ -68,9 +68,12 @@ export function createIntentLifecycle(dispatch: (intent: string) => void): Inten
     captureAgentEnd(text) {
       if (active?.dispatched) active.captured = text;
     },
-    settle() {
+    settle(aborted) {
       if (!active?.dispatched) return null;
       const { requestId, captured } = active;
+      // Either the intent's run or the run carrying it as a queued follow-up was
+      // aborted (Esc); partial text must not pass as a verdict.
+      if (aborted) return { requestId, ok: false, text: captured ?? "", error: "intent run aborted" };
       // No agent_end since dispatch: this settle closes a run that ended before the
       // intent arrived; the intent's own run is still to come.
       if (captured === null) return null;
