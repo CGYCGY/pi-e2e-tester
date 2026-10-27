@@ -33,6 +33,18 @@ other, every request carrying a shared token. Ports are **preferred** values —
 the transport auto-falls-back to the next free port and the resolved value
 propagates (`HUB_PORT` spawn env hub→spoke, `register{port}` message spoke→hub).
 
+**Intent lifecycle (spoke):** an intent wakes the spoke LLM with
+`isIdle() ? sendUserMessage(x) : sendUserMessage(x, {deliverAs:"followUp"})`;
+`isIdle()` is also false while a run is still starting (pi 1.2). A follow-up runs
+INSIDE the current run — pi's agent loop drains it before that run's one
+`agent_end`, with no new `agent_start` — so the intent is armed at dispatch, not
+on a later `agent_start`. `agent_end` is NOT the final signal: its text is only
+captured (each capture overwrites the last); the verdict resolves at
+`agent_settled`, which fires after any retry, compaction or queued follow-up, and
+an `agent_settled` with `aborted: true` (Esc) fails the intent. An intent that
+arrives during a manual compaction (how `/reset` sheds context) is held until the
+compaction ends, because pi rejects prompts meanwhile. Code: `spoke/intent.ts`.
+
 **Auto-readiness, not spawned-out terminals:** bring-up is `-bg` + logfiles in
 `logs/<app>/`, which give BOTH visibility (read the file) AND readiness (the hub
 tails for the real ready signal, with `adb devices` / `curl :8081/status` probe
@@ -50,7 +62,7 @@ since the hub regex-scans them for the ready signal.
 
 | Tool | Why | Check |
 |------|-----|-------|
-| **pi** ≥ 0.78 | the agent runtime | `pi --version` |
+| **pi** ≥ 1.2 | the agent runtime (the spoke needs `agent_settled.aborted` (1.1) and 1.2's busy-while-starting `isIdle()`) | `pi --version` |
 | **agent-device** | drives the phone | `agent-device --version` |
 | **adb** | device fallback + probes | `adb version` |
 | **just** | the recipe runner | `just --version` |
